@@ -3,8 +3,8 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"gopatch/internal/session"
-	"gopatch/model"
+	"gopub-edge/internal/session"
+	"gopub-edge/model"
 	"log"
 	"os"
 	"strconv"

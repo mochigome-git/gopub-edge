@@ -2,7 +2,7 @@ package mqtts
 
 import (
 	"fmt"
-	"gopatch/model"
+	"gopub-edge/model"
 	"sync"
 	"time"
 )
