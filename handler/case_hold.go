@@ -32,7 +32,7 @@ func handleTriggerCase(
 			utils.ChangeName(jsonPayloads)
 
 			payloadData := jsonPayloads.GetData()
-			envelope := buildReadingsEnvelope(payloadData)
+			envelope := buildReadingsEnvelope(payloadData, cfg)
 
 			jsonData, err := json.Marshal(envelope)
 			if err != nil {
@@ -96,7 +96,7 @@ func handleHoldCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloa
 			)
 
 			startTime := time.Now()
-			envelope := buildReadingsEnvelope(data)
+			envelope := buildReadingsEnvelope(data, cfg)
 			jsonData, err := json.Marshal(envelope)
 			if err != nil {
 				fmt.Println("Error marshaling JSON:", err)

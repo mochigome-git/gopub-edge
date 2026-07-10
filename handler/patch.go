@@ -39,7 +39,7 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		return
 	}
 
-	envelope := buildReadingsEnvelope(data)
+	envelope := buildReadingsEnvelope(data, cfg)
 
 	startTime := time.Now()
 	jsonData, err := json.Marshal(envelope)

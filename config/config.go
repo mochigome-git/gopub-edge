@@ -31,19 +31,25 @@ var (
 	// Insert/upsert publish path — this talks to EMQX, which is a
 	// different broker from the Mosquitto instance Broker/Port above
 	// point the subscriber at, so it gets its own connection settings.
-	EMQXBroker     string // EMQX host, no scheme
-	EMQXPort       string
-	EMQXUsername   string
-	EMQXPassword   string
-	EMQXTLSStr     string // "true"/"false"
-	EMQXCaCert     string // optional, PEM
-	EMQXClientCert string // optional, PEM (mTLS)
-	EMQXClientKey  string // optional, PEM (mTLS)
+	EMQXBroker         string // EMQX host, no scheme
+	EMQXPort           string
+	EMQXUsername       string
+	EMQXPassword       string
+	EMQXTLSStr         string // "true"/"false"
+	EMQXCaCert         string // optional, PEM
+	EMQXClientCert     string // optional, PEM (mTLS)
+	EMQXClientKey      string // optional, PEM (mTLS)
+	EMQXClientIDPrefix string // prepended to a fresh UUID per connection, e.g. to tell edge units apart in the EMQX dashboard
+	MQTTDebug          bool   // verbose paho packet logging — noisy, off by default
 
 	InsertRequestTopic string        // topic gopatch publishes patch/upsert requests to
 	ReplyTopicPrefix   string        // reply topic prefix; full reply topic is prefix+correlation_id
 	ReplyTimeoutSec    int           // how long to wait for an upsert reply before giving up
 	ReplyTimeout       time.Duration // ReplyTimeoutSec as a time.Duration
+
+	// ps-dashboard `readings` table identity — every row needs these two.
+	TenantID string // ps-dashboard tenant UUID this edge device belongs to
+	DeviceID string // ps-dashboard device UUID for this specific edge unit
 
 	PlcHost         string // plcHost stores the PLC's hostname
 	PlcPort         int    // plcPort stores the PLC's port number
@@ -94,35 +100,39 @@ func GetMqttConfig() MqttConfig {
 // different broker than the subscriber's Mosquitto config (MqttConfig
 // above) — pub goes to EMQX with username/password auth.
 type PublisherMqttConfig struct {
-	Broker     string
-	Port       string
-	Username   string
-	Password   string
-	UseTLS     bool
-	CACert     string
-	ClientCert string
-	ClientKey  string
+	Broker         string
+	Port           string
+	Username       string
+	Password       string
+	ClientIDPrefix string
+	UseTLS         bool
+	CACert         string
+	ClientCert     string
+	ClientKey      string
 
 	InsertRequestTopic string
 	ReplyTopicPrefix   string
 	ReplyTimeout       time.Duration
+	MQTTDebug          bool
 }
 
 func GetPublisherMqttConfig() PublisherMqttConfig {
 	useTLS, _ := strconv.ParseBool(EMQXTLSStr)
 	return PublisherMqttConfig{
-		Broker:     EMQXBroker,
-		Port:       EMQXPort,
-		Username:   EMQXUsername,
-		Password:   EMQXPassword,
-		UseTLS:     useTLS,
-		CACert:     EMQXCaCert,
-		ClientCert: EMQXClientCert,
-		ClientKey:  EMQXClientKey,
+		Broker:         EMQXBroker,
+		Port:           EMQXPort,
+		Username:       EMQXUsername,
+		Password:       EMQXPassword,
+		ClientIDPrefix: EMQXClientIDPrefix,
+		UseTLS:         useTLS,
+		CACert:         EMQXCaCert,
+		ClientCert:     EMQXClientCert,
+		ClientKey:      EMQXClientKey,
 
 		InsertRequestTopic: InsertRequestTopic,
 		ReplyTopicPrefix:   ReplyTopicPrefix,
 		ReplyTimeout:       ReplyTimeout,
+		MQTTDebug:          MQTTDebug,
 	}
 }
 
@@ -139,6 +149,9 @@ type AppConfig struct {
 	InsertRequestTopic string
 	ReplyTopicPrefix   string
 	ReplyTimeout       time.Duration
+
+	TenantID string
+	DeviceID string
 
 	Plc PlcConfig
 }
@@ -157,6 +170,9 @@ func GetAppConfig() AppConfig {
 		InsertRequestTopic: InsertRequestTopic,
 		ReplyTopicPrefix:   ReplyTopicPrefix,
 		ReplyTimeout:       ReplyTimeout,
+
+		TenantID: TenantID,
+		DeviceID: DeviceID,
 
 		Plc: GetPlcConfig(),
 	}
@@ -226,12 +242,21 @@ func Load(files ...string) {
 	EMQXCaCert = os.Getenv("EMQX_CA_CERTIFICATE")
 	EMQXClientCert = os.Getenv("EMQX_CLIENT_CERTIFICATE")
 	EMQXClientKey = os.Getenv("EMQX_PRIVATE_KEY")
+	EMQXClientIDPrefix = getEnv("EMQX_CLIENT_ID_PREFIX", "gopub-edge_publisher_")
+	MQTTDebug, _ = strconv.ParseBool(getEnv("MQTT_DEBUG", "false"))
 
 	// Insert/upsert publish path
 	InsertRequestTopic = getEnv("MQTT_INSERT_REQUEST_TOPIC", "gopatch/insert/request")
 	ReplyTopicPrefix = getEnv("MQTT_REPLY_TOPIC_PREFIX", "gopatch/reply/")
 	ReplyTimeoutSec, _ = strconv.Atoi(getEnv("MQTT_REPLY_TIMEOUT_SEC", "10"))
 	ReplyTimeout = time.Duration(ReplyTimeoutSec) * time.Second
+
+	// ps-dashboard `readings` table identity
+	TenantID = os.Getenv("TENANT_ID")
+	DeviceID = os.Getenv("DEVICE_ID")
+	if TenantID == "" || DeviceID == "" {
+		log.Println("⚠ TENANT_ID and/or DEVICE_ID not set — outgoing readings rows will be missing this identity until you set them")
+	}
 
 	PlcHost = os.Getenv("PLC_HOST")
 	PlcPortStr := getEnv("PLC_PORT", "5011")
@@ -250,6 +275,13 @@ func Load(files ...string) {
 	// Validate cycle config at startup so misconfiguration fails fast
 	if CycleModeEnabled && CycleAnchorTopic == "" {
 		log.Fatal("CYCLE_MODE_ENABLED=true but CYCLE_ANCHOR_TOPIC is not set")
+	}
+
+	// Fail fast on a missing EMQX host instead of the cryptic
+	// "dial tcp :8883: connect: connection refused" you get from an empty
+	// broker address reaching net.Dial.
+	if EMQXBroker == "" {
+		log.Fatal("EMQX_HOST is not set — check your .env.local is present and loaded, or export it in your shell")
 	}
 
 }

@@ -32,8 +32,10 @@ func main() {
 	//	}
 	//}()
 
-	// Load configuration
-	config.Load(".env.local")
+	// Load configuration — tries .env.local first, then .env for anything
+	// .env.local didn't set, then finally falls back to real system env
+	// vars for anything neither file set.
+	config.Load(".env.local", ".env")
 
 	logger := log.New(os.Stdout, "[PLC] ", log.LstdFlags)
 
@@ -48,16 +50,32 @@ func main() {
 	// Distinct broker from the Mosquitto subscriber below — patch.SendPatchRequest
 	// and patch.SendUpsertRequest use this instead of hitting Supabase directly.
 	pubCfg := config.GetPublisherMqttConfig()
-	pubOpts, err := mqttpub.BuildEMQXClientOptions(mqttpub.EMQXOptions{
-		Broker:     pubCfg.Broker,
-		Port:       pubCfg.Port,
-		Username:   pubCfg.Username,
-		Password:   pubCfg.Password,
-		UseTLS:     pubCfg.UseTLS,
-		CACert:     pubCfg.CACert,
-		ClientCert: pubCfg.ClientCert,
-		ClientKey:  pubCfg.ClientKey,
-	})
+
+	if pubCfg.MQTTDebug {
+		mqttpub.EnableDebugLogging()
+	}
+
+	emqxOpts := mqttpub.EMQXOptions{
+		Broker:         pubCfg.Broker,
+		Port:           pubCfg.Port,
+		Username:       pubCfg.Username,
+		Password:       pubCfg.Password,
+		ClientIDPrefix: pubCfg.ClientIDPrefix,
+		UseTLS:         pubCfg.UseTLS,
+		CACert:         pubCfg.CACert,
+		ClientCert:     pubCfg.ClientCert,
+		ClientKey:      pubCfg.ClientKey,
+	}
+
+	// Raw TLS handshake straight to the broker, outside paho. paho collapses
+	// every connect-time failure to a bare "EOF" — this reports the actual
+	// reason (bad CA, hostname/SNI mismatch, network drop) if TLS is the
+	// problem, before we even try the real MQTT connect.
+	if err := mqttpub.PreflightTLS(emqxOpts); err != nil {
+		logger.Fatalf("EMQX TLS preflight failed: %v", err)
+	}
+
+	pubOpts, err := mqttpub.BuildEMQXClientOptions(emqxOpts)
 	if err != nil {
 		logger.Fatalf("Failed to build EMQX publisher options: %v", err)
 	}

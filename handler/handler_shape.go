@@ -1,6 +1,10 @@
 package handler
 
-import "strings"
+import (
+	"strings"
+
+	"gopub-edge/config"
+)
 
 // --------------------------------------------------------------------------
 // Envelope shaping for the ps-dashboard `readings` table.
@@ -11,10 +15,10 @@ import "strings"
 //	  created_at, metric_a, metric_b, metric_c,
 //	  readings: {...}, output: {...}, status: {...}, limits: {...}, energy: {...} }
 //
-// gopub-edge doesn't know tenant_id/device_id/lot_id — those get resolved
+// gopub-edge doesn't know machine_id/lot_id/entity_id — those get resolved
 // downstream (gokafka-raw / your reply engine, keyed off the MQTT topic or
-// device registry). All gopub-edge does is bucket the flat key/value data
-// it already has into readings / output / limits.
+// device registry). tenant_id and device_id, though, are static per edge
+// deployment (set once via .env), so gopub-edge stamps those itself.
 // --------------------------------------------------------------------------
 
 // limitsKeys: SPC bounds -> limits JSONB.
@@ -38,16 +42,26 @@ var outputKeys = map[string]bool{
 	"total_count":  true,
 }
 
-// Everything not in limitsKeys/outputKeys falls into readings by default
-// (raw process values: ch1_fica1, ch1_tica1, ch{1,2,3}_weighing, vacuum, etc).
+// statusKeys: device/connectivity health -> status JSONB. Nothing in
+// gopub-edge's current payloads maps here yet (that's more of an ESP32/HMI
+// concept — rssi, uptime, net_mode) but the bucket is wired up structurally
+// so it's a one-line addition here whenever a field needs it, and so every
+// row keeps the same shape as other producers writing into this table.
+var statusKeys = map[string]bool{}
+
+// Everything not in limitsKeys/outputKeys/statusKeys falls into readings by
+// default (raw process values: ch1_fica1, ch1_tica1, ch{1,2,3}_weighing,
+// vacuum, etc).
 
 // shapeReadingsEnvelope buckets a flat merged payload into the
-// readings/output/limits shape. Empty buckets are omitted rather than sent
-// as {} so a plain "patch" case (3/4/7/8) with no limits/remarks doesn't
-// grow an empty limits/output key.
-func shapeReadingsEnvelope(data map[string]any) map[string]any {
+// readings/output/status/limits shape and stamps tenant_id/device_id at
+// the top level. Empty buckets are omitted rather than sent as {} so a
+// plain "patch" case (3/4/7/8) with no limits/remarks doesn't grow an
+// empty limits/output key.
+func shapeReadingsEnvelope(data map[string]any, cfg config.AppConfig) map[string]any {
 	readings := map[string]any{}
 	output := map[string]any{}
+	status := map[string]any{}
 	limitsOut := map[string]any{}
 
 	for k, v := range data {
@@ -56,17 +70,28 @@ func shapeReadingsEnvelope(data map[string]any) map[string]any {
 			limitsOut[k] = v
 		case outputKeys[k]:
 			output[k] = v
+		case statusKeys[k]:
+			status[k] = v
 		default:
 			readings[k] = v
 		}
 	}
 
 	envelope := map[string]any{}
+	if cfg.TenantID != "" {
+		envelope["tenant_id"] = cfg.TenantID
+	}
+	if cfg.DeviceID != "" {
+		envelope["device_id"] = cfg.DeviceID
+	}
 	if len(readings) > 0 {
 		envelope["readings"] = readings
 	}
 	if len(output) > 0 {
 		envelope["output"] = output
+	}
+	if len(status) > 0 {
+		envelope["status"] = status
 	}
 	if len(limitsOut) > 0 {
 		envelope["limits"] = limitsOut
@@ -110,13 +135,14 @@ func isNormalRemark(v any) bool {
 
 // buildReadingsEnvelope is the single entry point every publish call site
 // should use: it tallies good/reject/total from any remarks present, folds
-// that into the flat data, then shapes the result into readings/output/limits.
-func buildReadingsEnvelope(data map[string]any) map[string]any {
+// that into the flat data, then shapes the result into
+// tenant_id/device_id/readings/output/status/limits.
+func buildReadingsEnvelope(data map[string]any, cfg config.AppConfig) map[string]any {
 	good, reject, total := countRemarks(data)
 	if total > 0 {
 		data["good_count"] = good
 		data["reject_count"] = reject
 		data["total_count"] = total
 	}
-	return shapeReadingsEnvelope(data)
+	return shapeReadingsEnvelope(data, cfg)
 }
