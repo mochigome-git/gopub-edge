@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"time"
+
 	"gopub-edge/config"
 	"gopub-edge/internal/app"
 	"gopub-edge/internal/session"
 	"gopub-edge/patch"
-	"log"
-	"time"
 )
 
 func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application) {
@@ -38,14 +39,28 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		return
 	}
 
+	envelope := buildReadingsEnvelope(data)
+
 	startTime := time.Now()
-	jsonData, err := json.Marshal(data)
+	jsonData, err := json.Marshal(envelope)
 	if err != nil {
 		fmt.Println("Error marshaling JSON:", err)
 		return
 	}
 
-	if cfg.InsertMode == "upsert" {
+	// Decide upsert-vs-patch per call, based on whether the caller passed
+	// a plcApp — not off cfg.InsertMode globally. Cases that pass nil
+	// (6/7/8/9, WeightMCS) want fire-and-forget; a case that passes a real
+	// plcApp (e.g. the Vacuum healthcheck case) wants the reply so it can
+	// write X/Y/vacuum status back to the PLC. A single global InsertMode
+	// can't represent both at once.
+	//
+	// NOTE: publish/reply failures here are treated as transient (network
+	// blip, reply engine restart, timeout) and only logged. The old HTTP
+	// path used log.Fatal, which made sense for a synchronous call that
+	// either succeeded or definitively failed — but panicking gopatch on
+	// every MQTT hiccup would take the whole ingestion pipeline down.
+	if plcApp != nil {
 		_, err := patch.SendUpsertRequest(jsonData, cfg, plcApp, cfg.ReplyTimeout)
 		if err != nil {
 			log.Println("Error sending upsert request:", err)
@@ -53,12 +68,10 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	} else {
 		if err := patch.SendPatchRequest(jsonData); err != nil {
 			log.Println("Error publishing patch request:", err)
-			return
 		}
-
 	}
 
-	prettyPrintJSONWithTime(data, time.Since(startTime))
+	prettyPrintJSONWithTime(envelope, time.Since(startTime))
 
 	session.Mutex.Lock()
 	for key := range session.ProcessedPayloadsMap {
@@ -78,7 +91,6 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	if after != nil {
 		after()
 	}
-
 	drainChannel(rMsgJSONChan)
 
 	if plcApp != nil {
@@ -87,7 +99,6 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 			fmt.Println("PLC write failed:", err)
 		}
 	}
-
 }
 
 func shouldPatch(caseID string, ready bool, session *session.Session) bool {

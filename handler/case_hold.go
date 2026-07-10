@@ -32,8 +32,9 @@ func handleTriggerCase(
 			utils.ChangeName(jsonPayloads)
 
 			payloadData := jsonPayloads.GetData()
+			envelope := buildReadingsEnvelope(payloadData)
 
-			jsonData, err := json.Marshal(payloadData)
+			jsonData, err := json.Marshal(envelope)
 			if err != nil {
 				fmt.Println("Error marshaling JSON:", err)
 				return
@@ -48,7 +49,7 @@ func handleTriggerCase(
 			}
 
 			elapsedTime := time.Since(startTime)
-			prettyPrintJSONWithTime(payloadData, elapsedTime)
+			prettyPrintJSONWithTime(envelope, elapsedTime)
 		}
 	}
 }
@@ -95,7 +96,8 @@ func handleHoldCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloa
 			)
 
 			startTime := time.Now()
-			jsonData, err := json.Marshal(data)
+			envelope := buildReadingsEnvelope(data)
+			jsonData, err := json.Marshal(envelope)
 			if err != nil {
 				fmt.Println("Error marshaling JSON:", err)
 				return
@@ -107,7 +109,7 @@ func handleHoldCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloa
 			}
 
 			elapsedTime := time.Since(startTime)
-			prettyPrintJSONWithTime(data, elapsedTime)
+			prettyPrintJSONWithTime(envelope, elapsedTime)
 			// Update the previous state of sealing
 			session.PrevSealing = sealing
 		}
