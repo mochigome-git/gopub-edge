@@ -1,10 +1,10 @@
 package handler
 
 import (
-	"gopatch/config"
-	"gopatch/internal/app"
-	"gopatch/internal/session"
-	"gopatch/internal/utils"
+	"gopub-edge/config"
+	"gopub-edge/internal/app"
+	"gopub-edge/internal/session"
+	"gopub-edge/internal/utils"
 	"os"
 )
 
