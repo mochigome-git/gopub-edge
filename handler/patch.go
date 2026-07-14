@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -42,11 +41,6 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	envelope := buildReadingsEnvelope(data, cfg)
 
 	startTime := time.Now()
-	jsonData, err := json.Marshal(envelope)
-	if err != nil {
-		fmt.Println("Error marshaling JSON:", err)
-		return
-	}
 
 	// Decide upsert-vs-patch per call, based on whether the caller passed
 	// a plcApp — not off cfg.InsertMode globally. Cases that pass nil
@@ -61,12 +55,12 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	// either succeeded or definitively failed — but panicking gopatch on
 	// every MQTT hiccup would take the whole ingestion pipeline down.
 	if plcApp != nil {
-		_, err := patch.SendUpsertRequest(jsonData, cfg, plcApp, cfg.ReplyTimeout)
+		_, err := patch.SendUpsertRequest(envelope, cfg, plcApp, cfg.ReplyTimeout)
 		if err != nil {
 			log.Println("Error sending upsert request:", err)
 		}
 	} else {
-		if err := patch.SendPatchRequest(jsonData); err != nil {
+		if err := patch.SendPatchRequest(envelope); err != nil {
 			log.Println("Error publishing patch request:", err)
 		}
 	}

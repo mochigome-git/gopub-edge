@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"fmt"
 	"gopub-edge/config"
 	"gopub-edge/internal/session"
@@ -34,16 +33,10 @@ func handleTriggerCase(
 			payloadData := jsonPayloads.GetData()
 			envelope := buildReadingsEnvelope(payloadData, cfg)
 
-			jsonData, err := json.Marshal(envelope)
-			if err != nil {
-				fmt.Println("Error marshaling JSON:", err)
-				return
-			}
-
 			// Publish over MQTT instead of hitting Supabase directly.
 			// A publish failure here is transient (broker blip, etc.) —
 			// log it instead of panicking the whole process.
-			if err := patch.SendPatchRequest(jsonData); err != nil {
+			if err := patch.SendPatchRequest(envelope); err != nil {
 				log.Println("Error publishing patch request:", err)
 				return
 			}
@@ -97,13 +90,8 @@ func handleHoldCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloa
 
 			startTime := time.Now()
 			envelope := buildReadingsEnvelope(data, cfg)
-			jsonData, err := json.Marshal(envelope)
-			if err != nil {
-				fmt.Println("Error marshaling JSON:", err)
-				return
-			}
 
-			if err := patch.SendPatchRequest(jsonData); err != nil {
+			if err := patch.SendPatchRequest(envelope); err != nil {
 				log.Println("Error publishing patch request:", err)
 				return
 			}

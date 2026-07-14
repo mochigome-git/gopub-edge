@@ -246,8 +246,8 @@ func Load(files ...string) {
 	MQTTDebug, _ = strconv.ParseBool(getEnv("MQTT_DEBUG", "false"))
 
 	// Insert/upsert publish path
-	InsertRequestTopic = getEnv("MQTT_INSERT_REQUEST_TOPIC", "gopatch/insert/request")
-	ReplyTopicPrefix = getEnv("MQTT_REPLY_TOPIC_PREFIX", "gopatch/reply/")
+	InsertRequestTopic = getEnv("MQTT_INSERT_REQUEST_TOPIC", "gopub-edge/devices/payload")
+	ReplyTopicPrefix = getEnv("MQTT_REPLY_TOPIC_PREFIX", "gopub-edge/reply/")
 	ReplyTimeoutSec, _ = strconv.Atoi(getEnv("MQTT_REPLY_TIMEOUT_SEC", "10"))
 	ReplyTimeout = time.Duration(ReplyTimeoutSec) * time.Second
 

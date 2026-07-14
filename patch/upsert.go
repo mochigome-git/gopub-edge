@@ -30,12 +30,17 @@ type VacuumData struct {
 // topic (or until replyTimeout elapses). On success it parses the reply
 // data exactly like the old PostgREST "return=representation" body and
 // writes X/Y/vacuum status back to the PLC, unchanged from the HTTP version.
-func SendUpsertRequest(jsonPayload []byte, cfg config.AppConfig, plcApp *app.Application, replyTimeout time.Duration) ([]byte, error) {
+//
+// data should be the fully-shaped envelope (tenant_id, device_id, readings,
+// output, limits, status, metric_a/b/c, energy) — mqttpub adds
+// correlation_id/reply_topic/mode as sibling keys before publishing, no
+// wrapping field.
+func SendUpsertRequest(data map[string]any, cfg config.AppConfig, plcApp *app.Application, replyTimeout time.Duration) ([]byte, error) {
 	if Pub == nil {
 		return nil, fmt.Errorf("patch: Pub is not initialized (call mqttpub.NewPublisher and set patch.Pub at startup)")
 	}
 
-	reply, err := Pub.PublishAndAwaitReply(context.Background(), "upsert", jsonPayload, replyTimeout)
+	reply, err := Pub.PublishAndAwaitReply(context.Background(), data, replyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("upsert request failed: %w", err)
 	}

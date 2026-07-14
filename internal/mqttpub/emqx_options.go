@@ -82,7 +82,7 @@ func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 	if prefix == "" {
 		prefix = "gopub-edge_publisher_"
 	}
-	opts.SetClientID(prefix + uuid.New().String())
+	opts.SetClientID(prefix + "_" + uuid.New().String())
 	opts.SetUsername(o.Username)
 	opts.SetPassword(o.Password)
 	opts.SetKeepAlive(30 * time.Second)

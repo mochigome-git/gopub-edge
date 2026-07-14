@@ -4,15 +4,22 @@
 //
 // Two usage modes:
 //
-//   - Publish(mode, data): fire-and-forget. No reply_topic is attached, so
-//     the downstream engine knows not to bother replying. Used for the
-//     plain "patch" path where nothing in gopatch depends on the result.
+//   - Publish(data): fire-and-forget. No reply_topic is attached, so the
+//     downstream engine knows not to bother replying. Used for the plain
+//     "patch" path where nothing in gopub-edge depends on the result.
 //
-//   - PublishAndAwaitReply(ctx, mode, data, timeout): publishes with a
-//     fresh correlation_id and a reply_topic (replyPrefix + correlation_id),
-//     then blocks on an internal channel until a reply lands on that topic,
-//     the timeout elapses, or ctx is cancelled. Used for "upsert", where
-//     gopatch needs the returned row back to write PLC devices.
+//   - PublishAndAwaitReply(ctx, data, timeout): publishes with a reply_topic
+//     (replyPrefix + a fresh internal correlation id), then blocks until a
+//     message arrives on that exact topic, the timeout elapses, or ctx is
+//     cancelled. Used for "upsert", where gopub-edge needs the returned row
+//     back to write PLC devices.
+//
+// The published payload is a single flat JSON object: whatever's in data
+// (tenant_id, readings, output, limits, status, ...) plus reply_topic when
+// a reply is expected. There's no correlation_id or mode field in the
+// payload — reply_topic's presence/absence is the patch-vs-upsert signal,
+// and replies are matched by the MQTT topic they arrive on (which already
+// encodes the correlation id), not by a field inside the message.
 package mqttpub
 
 import (
@@ -20,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,18 +38,9 @@ import (
 // ReplyPayload is what the downstream insert engine publishes back on the
 // per-request reply topic once it has finished the insert/upsert.
 type ReplyPayload struct {
-	CorrelationID string          `json:"correlation_id"`
-	Success       bool            `json:"success"`
-	Error         string          `json:"error,omitempty"`
-	Data          json.RawMessage `json:"data,omitempty"` // raw row(s), same shape the old PostgREST response had
-}
-
-// RequestEnvelope is what gopatch publishes to the insert-request topic.
-type RequestEnvelope struct {
-	CorrelationID string          `json:"correlation_id"`
-	ReplyTopic    string          `json:"reply_topic,omitempty"` // empty => fire-and-forget, do not reply
-	Mode          string          `json:"mode"`                  // "patch" | "upsert"
-	Data          json.RawMessage `json:"data"`
+	Success bool            `json:"success"`
+	Error   string          `json:"error,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"` // raw row(s), same shape the old PostgREST response had
 }
 
 // Publisher owns a single MQTT client used both for publishing
@@ -49,11 +48,11 @@ type RequestEnvelope struct {
 // wildcard reply-topic subscription.
 type Publisher struct {
 	client       mqtt.Client
-	requestTopic string // e.g. "gopatch/insert/request"
-	replyPrefix  string // e.g. "gopatch/reply/" — replies arrive on replyPrefix+correlation_id
+	requestTopic string // e.g. "gopub-edge/insert/request"
+	replyPrefix  string // e.g. "gopub-edge/reply/" — replies arrive on replyPrefix+correlation_id
 
 	mu      sync.Mutex
-	pending map[string]chan ReplyPayload
+	pending map[string]chan ReplyPayload // keyed by correlation id, extracted from the reply's MQTT topic
 }
 
 // NewPublisher connects a dedicated MQTT client (pass in your own
@@ -82,24 +81,29 @@ func NewPublisher(opts *mqtt.ClientOptions, requestTopic, replyPrefix string) (*
 	return p, nil
 }
 
+// handleReply matches a reply to its waiting caller by MQTT topic, not by
+// any field inside the message body — the reply topic itself
+// (replyPrefix+correlationID) is the correlation key.
 func (p *Publisher) handleReply(_ mqtt.Client, msg mqtt.Message) {
+	correlationID := strings.TrimPrefix(msg.Topic(), p.replyPrefix)
+	if correlationID == "" || correlationID == msg.Topic() {
+		log.Printf("[mqttpub] ⚠ reply on unexpected topic %q, dropping", msg.Topic())
+		return
+	}
+
 	var reply ReplyPayload
 	if err := json.Unmarshal(msg.Payload(), &reply); err != nil {
 		log.Printf("[mqttpub] ⚠ failed to parse reply on %s: %v", msg.Topic(), err)
 		return
 	}
-	if reply.CorrelationID == "" {
-		log.Printf("[mqttpub] ⚠ reply on %s missing correlation_id, dropping", msg.Topic())
-		return
-	}
 
 	p.mu.Lock()
-	ch, ok := p.pending[reply.CorrelationID]
+	ch, ok := p.pending[correlationID]
 	p.mu.Unlock()
 
 	if !ok {
 		// Nobody waiting anymore — most likely we already timed out.
-		log.Printf("[mqttpub] reply for %s arrived after timeout (or unknown), dropping", reply.CorrelationID)
+		log.Printf("[mqttpub] reply for %s arrived after timeout (or unknown), dropping", correlationID)
 		return
 	}
 
@@ -110,9 +114,26 @@ func (p *Publisher) handleReply(_ mqtt.Client, msg mqtt.Message) {
 	}
 }
 
-// PublishAndAwaitReply publishes a request with a fresh correlation ID and
-// blocks until a matching reply arrives, ctx is cancelled, or timeout elapses.
-func (p *Publisher) PublishAndAwaitReply(ctx context.Context, mode string, data json.RawMessage, timeout time.Duration) (ReplyPayload, error) {
+// flattenEnvelope returns a shallow copy of data with reply_topic merged in
+// as a sibling key when replyTopic is non-empty. No wrapping field, no
+// correlation_id/mode in the payload.
+func flattenEnvelope(data map[string]any, replyTopic string) map[string]any {
+	out := make(map[string]any, len(data)+1)
+	for k, v := range data {
+		out[k] = v
+	}
+	if replyTopic != "" {
+		out["reply_topic"] = replyTopic
+	}
+	return out
+}
+
+// PublishAndAwaitReply publishes data with a reply_topic attached and
+// blocks until a message arrives on that topic, ctx is cancelled, or
+// timeout elapses. The correlation id is internal bookkeeping only (used
+// to build the reply topic and the pending-map key) — it is never put in
+// the outgoing JSON.
+func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]any, timeout time.Duration) (ReplyPayload, error) {
 	correlationID := uuid.New().String()
 	replyTopic := p.replyPrefix + correlationID
 
@@ -126,13 +147,7 @@ func (p *Publisher) PublishAndAwaitReply(ctx context.Context, mode string, data 
 		p.mu.Unlock()
 	}()
 
-	envelope := RequestEnvelope{
-		CorrelationID: correlationID,
-		ReplyTopic:    replyTopic,
-		Mode:          mode,
-		Data:          data,
-	}
-	payload, err := json.Marshal(envelope)
+	payload, err := json.Marshal(flattenEnvelope(data, replyTopic))
 	if err != nil {
 		return ReplyPayload{}, fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
@@ -148,20 +163,15 @@ func (p *Publisher) PublishAndAwaitReply(ctx context.Context, mode string, data 
 	case reply := <-replyCh:
 		return reply, nil
 	case <-waitCtx.Done():
-		return ReplyPayload{}, fmt.Errorf("mqttpub: timed out after %v waiting for reply (correlation_id=%s)", timeout, correlationID)
+		return ReplyPayload{}, fmt.Errorf("mqttpub: timed out after %v waiting for reply (reply_topic=%s)", timeout, replyTopic)
 	}
 }
 
 // Publish is fire-and-forget: no reply_topic is attached, so the
 // downstream insert engine knows not to reply. Used for the plain
-// "patch" path where nothing in gopatch needs the result back.
-func (p *Publisher) Publish(mode string, data json.RawMessage) error {
-	envelope := RequestEnvelope{
-		CorrelationID: uuid.New().String(),
-		Mode:          mode,
-		Data:          data,
-	}
-	payload, err := json.Marshal(envelope)
+// "patch" path where nothing in gopub-edge needs the result back.
+func (p *Publisher) Publish(data map[string]any) error {
+	payload, err := json.Marshal(flattenEnvelope(data, ""))
 	if err != nil {
 		return fmt.Errorf("mqttpub: marshal request: %w", err)
 	}

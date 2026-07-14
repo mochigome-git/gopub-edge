@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"encoding/json"
 	"fmt"
 	"gopub-edge/config"
 	"gopub-edge/internal/utils"
@@ -20,12 +19,9 @@ var deviceStartTimeMap = make(map[string]time.Time)
 // CASE 1, time.Duration; handling the process of time taken from 0 to 1, and record the total time duration
 func handleTimeDurationCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message,
 	loop float64) {
-
 	processKey := generateProcessKey(tk.TriggerKey)
-
 	if tk.TriggerKey != processPrevTriggerKeyMap[processKey] {
 		processPrevTriggerKeyMap[processKey] = tk.TriggerKey
-
 		if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger != 0 {
 			handleTimeDurationTrigger(tk, jsonPayloads, messages, loop)
 		}
@@ -34,16 +30,12 @@ func handleTimeDurationCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPay
 
 // CASE 2, Standard; handling a devices value and patch it, when the trigger is different with previous key
 func handleStandardCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message, cfg config.AppConfig) {
-
 	processKey := generateProcessKey(tk.TriggerKey)
-
 	if tk.TriggerKey != processPrevTriggerKeyMap[processKey] {
 		processPrevTriggerKeyMap[processKey] = tk.TriggerKey
-
 		if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger != 0 {
 			var startTime time.Time
 			processMessagesLoop(jsonPayloads, messages, startTime, cfg.Loop)
-
 			utils.CalculateAndStoreInklot(jsonPayloads)
 			utils.ChangeName(jsonPayloads)
 
@@ -51,19 +43,16 @@ func handleStandardCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayload
 				fmt.Println("Case 1")
 				fmt.Println(jsonPayloads)
 
-				jsonData, err := json.Marshal(jsonPayloads)
-				if err != nil {
-					fmt.Println("Error marshaling JSON:", err)
-					return
-				}
+				payloadData := jsonPayloads.GetData()
+				envelope := buildReadingsEnvelope(payloadData, cfg)
 
-				if err := patch.SendPatchRequest(jsonData); err != nil {
+				if err := patch.SendPatchRequest(envelope); err != nil {
 					log.Println("Error publishing patch request:", err)
 					return
 				}
 
 				elapsedTime := time.Since(startTime)
-				prettyPrintJSONWithTime(jsonPayloads, elapsedTime)
+				prettyPrintJSONWithTime(envelope, elapsedTime)
 			}
 		}
 	}
@@ -86,7 +75,6 @@ func handleTimeDurationTrigger(tk utils.TriggerKey, jsonPayloads *utils.SafeJson
 			utils.ChangeName(jsonPayloads)
 			processMessagesLoop(jsonPayloads, messages, startTime, loop)
 		}
-
 		deviceStartTimeMap[tk.TriggerKey] = time.Now()
 	}
 }
@@ -101,7 +89,6 @@ func generateProcessKey(triggerKey string) string {
 // If a key is repeated, it overwrites the existing value.
 func processMessagesLoop(jsonPayloads *utils.SafeJsonPayloads, messages []model.Message,
 	startTime time.Time, loop float64) {
-
 	for {
 		for _, message := range messages {
 			fieldNameLower := strings.ToLower(message.Address)
@@ -109,7 +96,6 @@ func processMessagesLoop(jsonPayloads *utils.SafeJsonPayloads, messages []model.
 			jsonPayloads.Set(fieldNameLower, fieldValue)
 		}
 		time.Sleep(time.Second)
-
 		if time.Since(startTime).Seconds() >= loop {
 			break
 		}
