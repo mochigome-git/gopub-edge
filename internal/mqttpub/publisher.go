@@ -1,6 +1,13 @@
 // Package mqttpub replaces the direct-to-Supabase HTTP patch/upsert calls
-// with MQTT publishes to EMQX. A separate downstream engine (gokafka-raw,
-// or whatever you point at the request topic) does the actual insert.
+// with MQTT publishes. A separate downstream engine (gokafka-raw, or
+// whatever you point at the request topic) does the actual insert.
+//
+// Requests go out over one broker (typically EMQX, the request-publishing
+// side) and replies come back over a second, potentially different broker
+// (typically the local edge Mosquitto gopub-edge already has a connection
+// to for PLC data) — NewPublisher takes an already-connected client for
+// the reply side rather than building its own, so that connection can be
+// shared with whatever else is using it instead of opening a redundant one.
 //
 // Two usage modes:
 //
@@ -10,9 +17,9 @@
 //
 //   - PublishAndAwaitReply(ctx, data, timeout): publishes with a reply_topic
 //     (replyPrefix + a fresh internal correlation id), then blocks until a
-//     message arrives on that exact topic, the timeout elapses, or ctx is
-//     cancelled. Used for "upsert", where gopub-edge needs the returned row
-//     back to write PLC devices.
+//     message arrives on that exact topic (via the reply-side client), the
+//     timeout elapses, or ctx is cancelled. Used for "upsert", where
+//     gopub-edge needs the returned row back to write PLC devices.
 //
 // The published payload is a single flat JSON object: whatever's in data
 // (tenant_id, readings, output, limits, status, ...) plus reply_topic when
@@ -43,40 +50,48 @@ type ReplyPayload struct {
 	Data    json.RawMessage `json:"data,omitempty"` // raw row(s), same shape the old PostgREST response had
 }
 
-// Publisher owns a single MQTT client used both for publishing
-// insert/upsert requests and for receiving correlated replies on a
-// wildcard reply-topic subscription.
+// Publisher owns two MQTT client connections: pubClient publishes
+// insert/upsert requests (typically EMQX), replyClient subscribes to a
+// wildcard reply-topic to receive correlated replies (typically the local
+// edge Mosquitto). They can be the same broker if you build both
+// mqtt.ClientOptions pointing at it.
 type Publisher struct {
-	client       mqtt.Client
-	requestTopic string // e.g. "gopub-edge/insert/request"
-	replyPrefix  string // e.g. "gopub-edge/reply/" — replies arrive on replyPrefix+correlation_id
+	pubClient   mqtt.Client
+	replyClient mqtt.Client
+
+	requestTopic string // e.g. "gopub-edge/insert/request" — published via pubClient
+	replyPrefix  string // e.g. "gopub-edge/reply/" — replies arrive here via replyClient, keyed by replyPrefix+correlation_id
 
 	mu      sync.Mutex
 	pending map[string]chan ReplyPayload // keyed by correlation id, extracted from the reply's MQTT topic
 }
 
-// NewPublisher connects a dedicated MQTT client (pass in your own
-// mqtt.ClientOptions — reuse the same TLS/broker config as your subscriber,
-// just give it a distinct ClientID) and subscribes to replyPrefix+"#".
-func NewPublisher(opts *mqtt.ClientOptions, requestTopic, replyPrefix string) (*Publisher, error) {
+// NewPublisher connects pubOpts (the request-publishing broker, e.g. EMQX)
+// and subscribes replyClient — an ALREADY-CONNECTED client, typically the
+// same Mosquitto connection gopub-edge already uses for PLC data — to
+// replyPrefix+"#". Publisher does not own replyClient's lifecycle: Close()
+// only disconnects the publish side; disconnecting replyClient is the
+// caller's responsibility (it may be shared with other subscriptions).
+func NewPublisher(pubOpts *mqtt.ClientOptions, replyClient mqtt.Client, requestTopic, replyPrefix string) (*Publisher, error) {
 	p := &Publisher{
 		requestTopic: requestTopic,
 		replyPrefix:  replyPrefix,
 		pending:      make(map[string]chan ReplyPayload),
 	}
 
-	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("mqttpub: connect failed: %w", token.Error())
+	pubClient := mqtt.NewClient(pubOpts)
+	if token := pubClient.Connect(); token.Wait() && token.Error() != nil {
+		return nil, fmt.Errorf("mqttpub: publish client connect failed: %w", token.Error())
 	}
-	p.client = client
+	p.pubClient = pubClient
+	p.replyClient = replyClient
 
 	subTopic := replyPrefix + "#"
-	if token := client.Subscribe(subTopic, 1, p.handleReply); token.Wait() && token.Error() != nil {
-		client.Disconnect(250)
+	if token := replyClient.Subscribe(subTopic, 1, p.handleReply); token.Wait() && token.Error() != nil {
+		pubClient.Disconnect(250)
 		return nil, fmt.Errorf("mqttpub: subscribe to %s failed: %w", subTopic, token.Error())
 	}
-	log.Printf("[mqttpub] ✓ connected — publishing to %q, replies on %q", requestTopic, subTopic)
+	log.Printf("[mqttpub] ✓ connected — publishing requests to %q, listening for replies on %q", requestTopic, subTopic)
 
 	return p, nil
 }
@@ -128,11 +143,11 @@ func flattenEnvelope(data map[string]any, replyTopic string) map[string]any {
 	return out
 }
 
-// PublishAndAwaitReply publishes data with a reply_topic attached and
-// blocks until a message arrives on that topic, ctx is cancelled, or
-// timeout elapses. The correlation id is internal bookkeeping only (used
-// to build the reply topic and the pending-map key) — it is never put in
-// the outgoing JSON.
+// PublishAndAwaitReply publishes data (via pubClient) with a reply_topic
+// attached and blocks until a message arrives on that topic (via
+// replyClient), ctx is cancelled, or timeout elapses. The correlation id is
+// internal bookkeeping only (used to build the reply topic and the
+// pending-map key) — it is never put in the outgoing JSON.
 func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]any, timeout time.Duration) (ReplyPayload, error) {
 	correlationID := uuid.New().String()
 	replyTopic := p.replyPrefix + correlationID
@@ -152,7 +167,7 @@ func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]an
 		return ReplyPayload{}, fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
 
-	if token := p.client.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
+	if token := p.pubClient.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
 		return ReplyPayload{}, fmt.Errorf("mqttpub: publish failed: %w", token.Error())
 	}
 
@@ -175,14 +190,18 @@ func (p *Publisher) Publish(data map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
-	if token := p.client.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
+	if token := p.pubClient.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
 		return fmt.Errorf("mqttpub: publish failed: %w", token.Error())
 	}
 	return nil
 }
 
+// Close disconnects the request-publishing client only. The reply-listen
+// client (replyClient passed into NewPublisher) is not owned by Publisher
+// and is not disconnected here — its lifecycle belongs to whoever created
+// it (e.g. gopub-edge's main.go, which shares it with the PLC subscriber).
 func (p *Publisher) Close() {
-	if p.client != nil && p.client.IsConnected() {
-		p.client.Disconnect(250)
+	if p.pubClient != nil && p.pubClient.IsConnected() {
+		p.pubClient.Disconnect(250)
 	}
 }

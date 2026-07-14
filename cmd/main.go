@@ -80,7 +80,16 @@ func main() {
 		logger.Fatalf("Failed to build EMQX publisher options: %v", err)
 	}
 
-	pub, err := mqttpub.NewPublisher(pubOpts, pubCfg.InsertRequestTopic, pubCfg.ReplyTopicPrefix)
+	// Connect to the local edge Mosquitto once, up front, and share this
+	// single connection for both reply-listening and the PLC-data
+	// subscription below (mqtts.Run) — no need for a second connection to
+	// the same broker.
+	mosquittoClient, err := mqtts.Connect(config.GetMqttConfig())
+	if err != nil {
+		logger.Fatalf("Failed to connect to Mosquitto: %v", err)
+	}
+
+	pub, err := mqttpub.NewPublisher(pubOpts, mosquittoClient, pubCfg.InsertRequestTopic, pubCfg.ReplyTopicPrefix)
 	if err != nil {
 		logger.Fatalf("Failed to connect EMQX publisher: %v", err)
 	}
@@ -94,8 +103,11 @@ func main() {
 	// Channel for receiving MQTT messages as JSON strings
 	receivedMessagesJSONChan := make(chan string, 1000)
 
-	// Start the MQTT client (Mosquitto subscriber) in a separate goroutine
-	go mqtts.Client(
+	// Run the PLC-data subscription on the SAME connection used for reply
+	// listening above (mosquittoClient) — subscribes cfg.Topic and blocks
+	// until shutdown.
+	go mqtts.Run(
+		mosquittoClient,
 		config.GetMqttConfig(),
 		receivedMessagesJSONChan,
 		clientDone,

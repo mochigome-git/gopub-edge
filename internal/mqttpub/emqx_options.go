@@ -13,9 +13,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// EMQXOptions holds everything needed to connect the publisher to EMQX.
-// This is deliberately separate from whatever config the subscriber uses
-// for Mosquitto — pub and sub are different brokers now.
+// EMQXOptions holds everything needed to connect to EMQX (the request-
+// publishing side). This is deliberately separate from Mosquitto config —
+// pub and reply-listen may be different brokers entirely.
 type EMQXOptions struct {
 	Broker   string // host only, no scheme
 	Port     string
@@ -29,7 +29,7 @@ type EMQXOptions struct {
 	ClientIDPrefix string
 
 	// TLS is optional. Leave UseTLS false to connect plain tcp:// (fine for
-	// a local/LAN EMQX). Set UseTLS true for mqtts://. CACert alone gives
+	// a local/LAN EMQX). Set UseTLS true for ssl://. CACert alone gives
 	// you server-verified TLS; also set ClientCert/ClientKey for mTLS.
 	UseTLS     bool
 	CACert     string // PEM, optional even when UseTLS is true
@@ -37,24 +37,24 @@ type EMQXOptions struct {
 	ClientKey  string // PEM, optional (mTLS)
 }
 
-// buildTLSConfig is shared by BuildEMQXClientOptions and PreflightTLS so
-// both use the exact same CA/cert setup — no risk of the preflight check
+// buildTLSConfigFromCerts is shared by EMQXOptions and MosquittoOptions so
+// both use identical CA/cert-loading logic — no risk of a preflight check
 // passing against a different trust config than the real connection uses.
-func buildTLSConfig(o EMQXOptions) (*tls.Config, error) {
+func buildTLSConfigFromCerts(caCert, clientCert, clientKey string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{}
 
-	if o.CACert != "" {
+	if caCert != "" {
 		caPool := x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM([]byte(o.CACert)) {
-			return nil, fmt.Errorf("mqttpub: failed to append EMQX CA certificate")
+		if !caPool.AppendCertsFromPEM([]byte(caCert)) {
+			return nil, fmt.Errorf("mqttpub: failed to append CA certificate")
 		}
 		tlsConfig.RootCAs = caPool
 	}
 
-	if o.ClientCert != "" && o.ClientKey != "" {
-		cert, err := tls.X509KeyPair([]byte(o.ClientCert), []byte(o.ClientKey))
+	if clientCert != "" && clientKey != "" {
+		cert, err := tls.X509KeyPair([]byte(clientCert), []byte(clientKey))
 		if err != nil {
-			return nil, fmt.Errorf("mqttpub: error loading EMQX client certificate/key: %w", err)
+			return nil, fmt.Errorf("mqttpub: error loading client certificate/key: %w", err)
 		}
 		tlsConfig.Certificates = []tls.Certificate{cert}
 	}
@@ -62,17 +62,14 @@ func buildTLSConfig(o EMQXOptions) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// BuildEMQXClientOptions builds mqtt.ClientOptions for the publisher's
-// connection to EMQX, using real username/password auth instead of the
-// hardcoded "emqx"/"public" the Mosquitto subscriber client uses.
+// BuildEMQXClientOptions builds mqtt.ClientOptions for the connection to
+// EMQX, using real username/password auth.
 func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 	opts := mqtt.NewClientOptions()
 
 	// NOTE: "ssl" here, not "mqtts". paho.mqtt.golang's scheme parser
 	// reliably recognizes tcp/ssl/tls/ws/wss — "mqtts" is not guaranteed
-	// to be handled the same way across versions and was the actual cause
-	// of the earlier "connect got error EOF" (confirmed against a known-
-	// working paho client in this same codebase that uses ssl://).
+	// to be handled the same way across versions.
 	scheme := "tcp"
 	if o.UseTLS {
 		scheme = "ssl"
@@ -82,7 +79,7 @@ func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 	if prefix == "" {
 		prefix = "gopub-edge_publisher_"
 	}
-	opts.SetClientID(prefix + "_" + uuid.New().String())
+	opts.SetClientID(prefix + uuid.New().String())
 	opts.SetUsername(o.Username)
 	opts.SetPassword(o.Password)
 	opts.SetKeepAlive(30 * time.Second)
@@ -93,7 +90,7 @@ func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 	opts.SetMaxReconnectInterval(30 * time.Second)
 
 	if o.UseTLS {
-		tlsConfig, err := buildTLSConfig(o)
+		tlsConfig, err := buildTLSConfigFromCerts(o.CACert, o.ClientCert, o.ClientKey)
 		if err != nil {
 			return nil, err
 		}
@@ -104,23 +101,18 @@ func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 }
 
 // PreflightTLS does a raw TLS handshake straight to the broker, completely
-// outside paho. paho tends to collapse every connect-time failure down to
-// a bare "EOF" (see: the connection-refused-looking error you just hit) —
-// this reports the actual reason (bad CA, expired cert, hostname/SNI
-// mismatch, TCP-level drop, timeout) instead. Call this before
-// NewPublisher so a bad cert/network path fails with a useful message.
-// No-op (returns nil) when UseTLS is false.
+// outside paho, so a bad cert/network path fails with a clear reason
+// (bad CA, expired cert, hostname/SNI mismatch, TCP-level drop, timeout)
+// instead of paho's generic "EOF". No-op when UseTLS is false.
 func PreflightTLS(o EMQXOptions) error {
 	if !o.UseTLS {
 		return nil
 	}
 
-	tlsConfig, err := buildTLSConfig(o)
+	tlsConfig, err := buildTLSConfigFromCerts(o.CACert, o.ClientCert, o.ClientKey)
 	if err != nil {
 		return err
 	}
-	// ServerName drives SNI — required for host-based routing setups
-	// (common on cloud-hosted EMQX behind a shared TLS proxy).
 	tlsConfig.ServerName = o.Broker
 
 	addr := net.JoinHostPort(o.Broker, o.Port)

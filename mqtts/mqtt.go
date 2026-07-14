@@ -98,10 +98,16 @@ func ECSgetClientOptionsTLS(broker, port, ECScaCert, ECSclientCert, ECSclientKey
 }
 
 // --------------------------------------------------------------------------
-// Main client entry point
+// Connection (split out of the old Client() so the connected client can be
+// reused elsewhere — e.g. mqttpub.Publisher subscribing for replies on this
+// same broker instead of opening a second connection)
 // --------------------------------------------------------------------------
 
-func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clientDone chan<- struct{}) {
+// Connect builds client options from cfg (TLS or plain, matching MQTTSStr)
+// and connects, retrying up to 5 times with a 2s backoff. Returns the
+// connected client — caller is responsible for eventually calling Run (to
+// subscribe cfg.Topic and block until shutdown) and/or Disconnect.
+func Connect(cfg config.MqttConfig) (mqtt.Client, error) {
 	mqtts, _ := strconv.ParseBool(cfg.MQTTSStr)
 	var opts *mqtt.ClientOptions
 
@@ -109,8 +115,7 @@ func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clien
 		var err error
 		opts, err = ECSgetClientOptionsTLS(cfg.Broker, cfg.Port, cfg.ECScaCert, cfg.ECSclientCert, cfg.ECSclientKey)
 		if err != nil {
-			log.Fatalf("Error requesting MQTT TLS configuration: %v", err.Error())
-			return
+			return nil, fmt.Errorf("error requesting MQTT TLS configuration: %w", err)
 		}
 	} else {
 		opts = getClientOptions(cfg.Broker, cfg.Port)
@@ -119,18 +124,28 @@ func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clien
 	client := mqtt.NewClient(opts)
 
 	maxAttempts := 5
+	var lastErr error
 	for i := 1; i <= maxAttempts; i++ {
 		if token := client.Connect(); token.Wait() && token.Error() == nil {
-			break
+			return client, nil
 		} else {
-			log.Printf("MQTT connect failed (attempt %d/%d): %v", i, maxAttempts, token.Error())
-			time.Sleep(2 * time.Second)
-			if i == maxAttempts {
-				log.Fatalf("MQTT connect failed after %d attempts", maxAttempts)
+			lastErr = token.Error()
+			log.Printf("MQTT connect failed (attempt %d/%d): %v", i, maxAttempts, lastErr)
+			if i < maxAttempts {
+				time.Sleep(2 * time.Second)
 			}
 		}
 	}
+	return nil, fmt.Errorf("MQTT connect failed after %d attempts: %w", maxAttempts, lastErr)
+}
 
+// Run subscribes an already-connected client (see Connect) to cfg.Topic,
+// starts the cycle buffer + legacy flusher, and blocks until
+// SIGINT/SIGTERM, then shuts down gracefully (unsubscribes, disconnects,
+// closes clientDone). Any other subscriptions added to client before
+// calling Run (e.g. a reply-topic listener sharing this connection)
+// continue running independently — this only manages cfg.Topic's lifecycle.
+func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clientDone chan<- struct{}) {
 	// -----------------------------------------------------------------
 	// Cycle buffer setup
 	// All config comes from cfg (populated by config.Load from .env / ECS).
@@ -178,6 +193,20 @@ func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clien
 	client.Disconnect(250)
 	close(clientDone)
 	log.Println("MQTT client shut down gracefully.")
+}
+
+// Client connects and runs, blocking until shutdown — kept for backward
+// compatibility with existing callers. Equivalent to Connect(cfg) followed
+// by Run(client, cfg, ...). New code that needs the connected client for
+// additional subscriptions (e.g. reply listening) should call Connect and
+// Run separately instead, the way main.go does.
+func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clientDone chan<- struct{}) {
+	client, err := Connect(cfg)
+	if err != nil {
+		log.Fatalf("%v", err)
+		return
+	}
+	Run(client, cfg, receivedMessagesJSONChan, clientDone)
 }
 
 // --------------------------------------------------------------------------
@@ -353,9 +382,9 @@ func ResetReceivedMessages() {
 }
 
 // GetBufferStats returns combined diagnostics for both the legacy flusher and cycle buffer.
-func GetBufferStats() map[string]interface{} {
+func GetBufferStats() map[string]any {
 	receivedMessagesMutex.Lock()
-	legacyStats := map[string]interface{}{
+	legacyStats := map[string]any{
 		"queue_length":     len(receivedMessages),
 		"burst_active":     burstActive,
 		"time_since_last":  time.Since(lastMessageTime).Milliseconds(),
@@ -364,7 +393,7 @@ func GetBufferStats() map[string]interface{} {
 	}
 	receivedMessagesMutex.Unlock()
 
-	stats := map[string]interface{}{
+	stats := map[string]any{
 		"legacy": legacyStats,
 	}
 
