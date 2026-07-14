@@ -48,6 +48,8 @@ func (p *Publisher) StartHeartbeat(stop <-chan struct{}, tenantID, deviceID, ver
 				}
 				if err := p.Publish(hb); err != nil {
 					log.Printf("[mqttpub] ⚠ heartbeat publish failed: %v", err)
+				} else {
+					log.Printf("[mqttpub] ♥ heartbeat published (topic=%s uptime_s=%v)", p.requestTopic, hb["status"].(map[string]any)["uptime_s"])
 				}
 			}
 		}
