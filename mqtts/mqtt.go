@@ -115,7 +115,7 @@ func Connect(cfg config.MqttConfig) (mqtt.Client, error) {
 		var err error
 		opts, err = ECSgetClientOptionsTLS(cfg.Broker, cfg.Port, cfg.ECScaCert, cfg.ECSclientCert, cfg.ECSclientKey)
 		if err != nil {
-			return nil, fmt.Errorf("error requesting MQTT TLS configuration: %w", err)
+			return nil, fmt.Errorf("[mqttlocal] error requesting MQTT TLS configuration: %w", err)
 		}
 	} else {
 		opts = getClientOptions(cfg.Broker, cfg.Port)
@@ -130,13 +130,13 @@ func Connect(cfg config.MqttConfig) (mqtt.Client, error) {
 			return client, nil
 		} else {
 			lastErr = token.Error()
-			log.Printf("MQTT connect failed (attempt %d/%d): %v", i, maxAttempts, lastErr)
+			log.Printf("[mqttlocal] MQTT connect failed (attempt %d/%d): %v", i, maxAttempts, lastErr)
 			if i < maxAttempts {
 				time.Sleep(2 * time.Second)
 			}
 		}
 	}
-	return nil, fmt.Errorf("MQTT connect failed after %d attempts: %w", maxAttempts, lastErr)
+	return nil, fmt.Errorf("[mqttlocal] MQTT connect failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // Run subscribes an already-connected client (see Connect) to cfg.Topic,
@@ -159,7 +159,7 @@ func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan cha
 	if cfg.CycleModeEnabled {
 		globalCycleBuffer = NewCycleBuffer(cfg.CycleAnchorTopic, cfg.CycleTimeout)
 		go consumeCycles(globalCycleBuffer, receivedMessagesJSONChan, stopCycle)
-		log.Printf("✓ Cycle mode enabled — anchor: %s, timeout: %v", cfg.CycleAnchorTopic, cfg.CycleTimeout)
+		log.Printf("[mqttlocal] ✓ Cycle mode enabled — anchor: %s, timeout: %v", cfg.CycleAnchorTopic, cfg.CycleTimeout)
 	}
 
 	// -----------------------------------------------------------------
@@ -173,11 +173,11 @@ func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan cha
 	if token := client.Subscribe(cfg.Topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 		messageReceived(msg)
 	}); token.Wait() && token.Error() != nil {
-		log.Fatalf("Error subscribing to topic: %v", token.Error())
+		log.Fatalf("[mqttlocal] Error subscribing to topic: %v", token.Error())
 		return
 	}
 
-	log.Printf("Subscribed to topic: %s\n", cfg.Topic)
+	log.Printf("[mqttlocal] Subscribed to topic: %s\n", cfg.Topic)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -192,7 +192,7 @@ func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan cha
 	client.Unsubscribe(cfg.Topic)
 	client.Disconnect(250)
 	close(clientDone)
-	log.Println("MQTT client shut down gracefully.")
+	log.Println("[mqttlocal] MQTT client shut down gracefully.")
 }
 
 // Client connects and runs, blocking until shutdown — kept for backward
@@ -218,7 +218,7 @@ func Client(cfg config.MqttConfig, receivedMessagesJSONChan chan<- string, clien
 func messageReceived(msg mqtt.Message) {
 	var mqttData MqttData
 	if err := json.Unmarshal(msg.Payload(), &mqttData); err != nil {
-		log.Printf("Error parsing JSON: %v\n", err)
+		log.Printf("[mqttlocal] Error parsing JSON: %v\n", err)
 		return
 	}
 
@@ -363,11 +363,11 @@ func flushMessages(receivedMessagesJSONChan chan<- string, force bool) {
 // --------------------------------------------------------------------------
 
 var connectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
-	log.Println("✓ Connected to MQTT broker")
+	log.Println("[mqttlocal] ✓ Connected to MQTT broker")
 }
 
 var connectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
-	log.Fatalf("✗ Connection lost: %v\n", err)
+	log.Fatalf("[mqttlocal] ✗ Connection lost: %v\n", err)
 }
 
 func ResetReceivedMessages() {
@@ -378,7 +378,7 @@ func ResetReceivedMessages() {
 	burstActive = false
 	lastMessageTime = time.Time{}
 	receivedMessagesMutex.Unlock()
-	log.Println("🔄 Received messages buffer reset")
+	log.Println("[mqttlocal] 🔄 Received messages buffer reset")
 }
 
 // GetBufferStats returns combined diagnostics for both the legacy flusher and cycle buffer.
