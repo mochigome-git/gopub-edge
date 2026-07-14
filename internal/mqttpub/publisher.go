@@ -9,17 +9,25 @@
 // the reply side rather than building its own, so that connection can be
 // shared with whatever else is using it instead of opening a redundant one.
 //
-// Two usage modes:
+// Three usage modes:
 //
 //   - Publish(data): fire-and-forget. No reply_topic is attached, so the
 //     downstream engine knows not to bother replying. Used for the plain
 //     "patch" path where nothing in gopub-edge depends on the result.
 //
 //   - PublishAndAwaitReply(ctx, data, timeout): publishes with a reply_topic
-//     (replyPrefix + a fresh internal correlation id), then blocks until a
-//     message arrives on that exact topic (via the reply-side client), the
-//     timeout elapses, or ctx is cancelled. Used for "upsert", where
-//     gopub-edge needs the returned row back to write PLC devices.
+//     (replyPrefix + a fresh internal correlation id) over the REMOTE
+//     broker (pubClient, EMQX), then blocks until a message arrives on
+//     that exact topic (via the reply-side client), the timeout elapses,
+//     or ctx is cancelled. Used for "upsert", where gopub-edge needs the
+//     returned row back to write PLC devices.
+//
+//   - PublishAndAwaitReplyLocal(ctx, localTopic, data, timeout): same
+//     request/reply shape as above, but the REQUEST itself goes out over
+//     the LOCAL broker (replyClient, Mosquitto) instead of EMQX — for
+//     consumers running on the same edge unit (e.g. vacuum-engine), where
+//     round-tripping the request through the cloud broker just to come
+//     back down to the same LAN is pure added latency for no benefit.
 //
 // The published payload is a single flat JSON object: whatever's in data
 // (tenant_id, readings, output, limits, status, ...) plus reply_topic when
@@ -143,11 +151,12 @@ func flattenEnvelope(data map[string]any, replyTopic string) map[string]any {
 	return out
 }
 
-// PublishAndAwaitReply publishes data (via pubClient) with a reply_topic
-// attached and blocks until a message arrives on that topic (via
-// replyClient), ctx is cancelled, or timeout elapses. The correlation id is
-// internal bookkeeping only (used to build the reply topic and the
-// pending-map key) — it is never put in the outgoing JSON.
+// PublishAndAwaitReply publishes data (via pubClient, the REMOTE broker —
+// typically EMQX) with a reply_topic attached and blocks until a message
+// arrives on that topic (via replyClient), ctx is cancelled, or timeout
+// elapses. The correlation id is internal bookkeeping only (used to build
+// the reply topic and the pending-map key) — it is never put in the
+// outgoing JSON.
 func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]any, timeout time.Duration) (ReplyPayload, error) {
 	correlationID := uuid.New().String()
 	replyTopic := p.replyPrefix + correlationID
@@ -169,6 +178,49 @@ func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]an
 
 	if token := p.pubClient.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
 		return ReplyPayload{}, fmt.Errorf("mqttpub: publish failed: %w", token.Error())
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case reply := <-replyCh:
+		return reply, nil
+	case <-waitCtx.Done():
+		return ReplyPayload{}, fmt.Errorf("mqttpub: timed out after %v waiting for reply (reply_topic=%s)", timeout, replyTopic)
+	}
+}
+
+// PublishAndAwaitReplyLocal is identical to PublishAndAwaitReply except the
+// REQUEST itself goes out over the LOCAL broker (replyClient, typically
+// Mosquitto) instead of the remote request broker (pubClient, typically
+// EMQX). Use this when the consumer (e.g. vacuum-engine) runs on the same
+// edge unit as gopub-edge — there's no reason to round-trip the request
+// through the cloud broker just to come back down to the same LAN. The
+// consumer is responsible for publishing its own finished result to EMQX
+// separately, once it has one (see govacuum-engine-gc's
+// mqtt.ConnectEMQXPublisher/PublishMetric).
+func (p *Publisher) PublishAndAwaitReplyLocal(ctx context.Context, localTopic string, data map[string]any, timeout time.Duration) (ReplyPayload, error) {
+	correlationID := uuid.New().String()
+	replyTopic := p.replyPrefix + correlationID
+
+	replyCh := make(chan ReplyPayload, 1)
+	p.mu.Lock()
+	p.pending[correlationID] = replyCh
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.pending, correlationID)
+		p.mu.Unlock()
+	}()
+
+	payload, err := json.Marshal(flattenEnvelope(data, replyTopic))
+	if err != nil {
+		return ReplyPayload{}, fmt.Errorf("mqttpub: marshal request: %w", err)
+	}
+
+	if token := p.replyClient.Publish(localTopic, 1, false, payload); token.Wait() && token.Error() != nil {
+		return ReplyPayload{}, fmt.Errorf("mqttpub: local publish failed: %w", token.Error())
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)

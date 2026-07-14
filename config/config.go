@@ -69,6 +69,12 @@ var (
 	HeartbeatIntervalSec int           // how often to publish a heartbeat
 	HeartbeatInterval    time.Duration // HeartbeatIntervalSec as a time.Duration
 	AppVersion           string        // reported as status.fw in the heartbeat payload
+
+	// LocalVacuumRequestTopic is the LOCAL Mosquitto topic gopub-edge
+	// publishes vacuum upsert requests to directly, bypassing EMQX for
+	// this hop since vacuum-engine runs on the same Pi. Must match
+	// vacuum-engine's MosquittoConfig.RequestTopic exactly.
+	LocalVacuumRequestTopic string
 )
 
 // --------------------------------------------------------------------------
@@ -157,6 +163,8 @@ type AppConfig struct {
 	ReplyTopicPrefix   string
 	ReplyTimeout       time.Duration
 
+	LocalVacuumRequestTopic string
+
 	TenantID string
 	DeviceID string
 
@@ -177,6 +185,8 @@ func GetAppConfig() AppConfig {
 		InsertRequestTopic: InsertRequestTopic,
 		ReplyTopicPrefix:   ReplyTopicPrefix,
 		ReplyTimeout:       ReplyTimeout,
+
+		LocalVacuumRequestTopic: LocalVacuumRequestTopic,
 
 		TenantID: TenantID,
 		DeviceID: DeviceID,
@@ -273,7 +283,7 @@ func Load(files ...string) {
 	MQTTDebug, _ = strconv.ParseBool(getEnv("MQTT_DEBUG", "false"))
 
 	// Insert/upsert publish path
-	InsertRequestTopic = getEnv("MQTT_INSERT_REQUEST_TOPIC", "gopub-edge/devices/payload")
+	InsertRequestTopic = getEnv("EMQX_INSERT_REQUEST_TOPIC", "gopub-edge/devices/payload")
 	ReplyTopicPrefix = getEnv("MQTT_REPLY_TOPIC_PREFIX", "gopub-edge/reply/")
 	ReplyTimeoutSec, _ = strconv.Atoi(getEnv("MQTT_REPLY_TIMEOUT_SEC", "10"))
 	ReplyTimeout = time.Duration(ReplyTimeoutSec) * time.Second
@@ -308,6 +318,9 @@ func Load(files ...string) {
 	HeartbeatIntervalSec, _ = strconv.Atoi(getEnv("HEARTBEAT_INTERVAL_SEC", "30"))
 	HeartbeatInterval = time.Duration(HeartbeatIntervalSec) * time.Second
 	AppVersion = getEnv("APP_VERSION", "dev")
+
+	// Local vacuum-engine request path — same Pi, no EMQX round trip
+	LocalVacuumRequestTopic = getEnv("LOCAL_VACUUM_REQUEST_TOPIC", "gopub-edge/vacuum/request")
 
 	// Fail fast on a missing EMQX host instead of the cryptic
 	// "dial tcp :8883: connect: connection refused" you get from an empty
