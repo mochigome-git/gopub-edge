@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"gopub-edge/config"
 	"gopub-edge/handler"
@@ -18,6 +19,11 @@ import (
 )
 
 func main() {
+	// startTime is captured here, at process boot, so the heartbeat's
+	// uptime_s reflects how long this gopub-edge process has been
+	// running (matching how the ESP32 side reports its own uptime).
+	startTime := time.Now()
+
 	// Register the profiling handlers with the default HTTP server mux.
 	// This will serve the profiling endpoints at /debug/pprof.
 	/**
@@ -27,9 +33,9 @@ func main() {
 	**/
 	// Start profiling server
 	//go func() {
-	//	if err := http.ListenAndServe("192.168.0.126:6060", nil); err != nil {
-	//		log.Fatalf("Error starting profiling server: %v", err)
-	//	}
+	//  if err := http.ListenAndServe("192.168.0.126:6060", nil); err != nil {
+	//      log.Fatalf("Error starting profiling server: %v", err)
+	//  }
 	//}()
 
 	// Load configuration — tries .env.local first, then .env for anything
@@ -96,6 +102,11 @@ func main() {
 	patch.Pub = pub
 	defer pub.Close()
 
+	// --- Heartbeat — periodic liveness ping over the same publish path ---
+	hbCfg := config.GetHeartbeatConfig()
+	stopHeartbeat := make(chan struct{})
+	pub.StartHeartbeat(stopHeartbeat, hbCfg.TenantID, hbCfg.DeviceID, hbCfg.Version, startTime, hbCfg.Interval)
+
 	// Channels for communication and termination
 	stopProcessing := make(chan struct{})
 	clientDone := make(chan struct{})
@@ -133,6 +144,7 @@ func main() {
 	<-sigCh
 
 	// Initiate graceful shutdown
+	close(stopHeartbeat)
 	close(stopProcessing)
 	// Wait for client to finish
 	<-clientDone

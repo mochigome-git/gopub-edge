@@ -62,6 +62,13 @@ var (
 	CycleModeEnabled bool          // Enable cycle-boundary detection via anchor topic repeat
 	CycleAnchorTopic string        // The very first MQTT topic the PLC publishes each scan cycle
 	CycleTimeout     time.Duration // Safety flush if anchor topic goes silent (e.g. 5s)
+
+	// Heartbeat — periodic liveness ping over the same insert/upsert
+	// publish path (mqttpub.Publisher), landing in the same table as
+	// readings rows with status.kind="heartbeat" and everything else null.
+	HeartbeatIntervalSec int           // how often to publish a heartbeat
+	HeartbeatInterval    time.Duration // HeartbeatIntervalSec as a time.Duration
+	AppVersion           string        // reported as status.fw in the heartbeat payload
 )
 
 // --------------------------------------------------------------------------
@@ -198,6 +205,26 @@ func GetPlcConfig() PlcConfig {
 	}
 }
 
+// HeartbeatConfig holds everything main.go needs to start the periodic
+// heartbeat publisher. TenantID/DeviceID are shared with AppConfig — same
+// identity, just also needed here since main.go wires the heartbeat up
+// separately from handler.ProcessMQTTData.
+type HeartbeatConfig struct {
+	TenantID string
+	DeviceID string
+	Version  string
+	Interval time.Duration
+}
+
+func GetHeartbeatConfig() HeartbeatConfig {
+	return HeartbeatConfig{
+		TenantID: TenantID,
+		DeviceID: DeviceID,
+		Version:  AppVersion,
+		Interval: HeartbeatInterval,
+	}
+}
+
 // --------------------------------------------------------------------------
 // Load
 // --------------------------------------------------------------------------
@@ -276,6 +303,11 @@ func Load(files ...string) {
 	if CycleModeEnabled && CycleAnchorTopic == "" {
 		log.Fatal("CYCLE_MODE_ENABLED=true but CYCLE_ANCHOR_TOPIC is not set")
 	}
+
+	// Heartbeat
+	HeartbeatIntervalSec, _ = strconv.Atoi(getEnv("HEARTBEAT_INTERVAL_SEC", "30"))
+	HeartbeatInterval = time.Duration(HeartbeatIntervalSec) * time.Second
+	AppVersion = getEnv("APP_VERSION", "dev")
 
 	// Fail fast on a missing EMQX host instead of the cryptic
 	// "dial tcp :8883: connect: connection refused" you get from an empty
