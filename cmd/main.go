@@ -43,7 +43,7 @@ func main() {
 	// vars for anything neither file set.
 	config.Load(".env.local", ".env")
 
-	logger := log.New(os.Stdout, "[PLC] ", log.LstdFlags)
+	logger := log.New(os.Stdout, "[PLC] ", log.LstdFlags|log.Lmsgprefix)
 
 	// Create the Application once at startup
 	plcApp, err := app.NewApplication(config.GetPlcConfig(), logger)
