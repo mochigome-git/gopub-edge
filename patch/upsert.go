@@ -12,11 +12,13 @@ import (
 )
 
 // VacuumData is the shape the reply engine (vacuum-engine) sends back on
-// the correlated reply topic. X/YStatus are now plain within-IQR booleans
-// (true = within range) rather than string labels — vacuum-engine only
-// replies at all when the reading passed its IQR check, and PLC write-back
-// below writes these straight through as boolean coils alongside
-// VacuumStatus, so all three need to be the same type.
+// the correlated reply topic. XStatus/YStatus are the descriptive IQR
+// classification strings ("Within IQR", "Outlier", "Building Data",
+// "No Data", ...) — W10/W20 are word/text registers the PLC reads as a
+// status label, not boolean coils, so these need to stay strings.
+// VacuumStatus is the one real boolean here, written to the M4350 bit
+// coil. Mixing string/string/bool in the dataList []any below is fine —
+// []any doesn't require uniform element types.
 type VacuumData struct {
 	ID              string   `json:"id"`
 	CreatedAt       string   `json:"created_at"`
@@ -24,8 +26,8 @@ type VacuumData struct {
 	VacuumLeave1min float64  `json:"vacuum_leave_1min"`
 	VacuumLeave2min float64  `json:"vacuum_leave_2min"`
 	VacuumLeave3min float64  `json:"vacuum_leave_3min"`
-	XStatus         bool     `json:"x_status"`
-	YStatus         bool     `json:"y_status"`
+	XStatus         string   `json:"x_status"`
+	YStatus         string   `json:"y_status"`
 	VacuumStatus    bool     `json:"vacuum_status"`
 	X               *float64 `json:"x"`
 	Y               *float64 `json:"y"`
