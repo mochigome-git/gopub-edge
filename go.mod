@@ -1,12 +1,12 @@
 module gopub-edge
 
-go 1.25.7
+go 1.26.5
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
-	github.com/mochigome-git/msp-go v0.0.0-20250812085448-7229f62b9b97
+	github.com/mochigome-git/msp-go v1.3.1
 	github.com/stretchr/testify v1.11.1
 )
 
