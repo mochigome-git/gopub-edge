@@ -49,15 +49,15 @@ type VacuumData struct {
 // reply_topic as a sibling key before publishing, no wrapping field.
 func SendUpsertRequest(data map[string]any, cfg config.AppConfig, plcApp *app.Application, replyTimeout time.Duration) ([]byte, error) {
 	if Pub == nil {
-		return nil, fmt.Errorf("patch: Pub is not initialized (call mqttpub.NewPublisher and set patch.Pub at startup)")
+		return nil, fmt.Errorf("[patch] Pub is not initialized (call mqttpub.NewPublisher and set patch.Pub at startup)")
 	}
 
 	reply, err := Pub.PublishAndAwaitReplyLocal(context.Background(), cfg.LocalVacuumRequestTopic, data, replyTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("upsert request failed: %w", err)
+		return nil, fmt.Errorf("[upsert] upsert request failed: %w", err)
 	}
 	if !reply.Success {
-		return nil, fmt.Errorf("insert engine reported failure: %s", reply.Error)
+		return nil, fmt.Errorf("[upsert] insert engine reported failure: %s", reply.Error)
 	}
 
 	var result []VacuumData
@@ -65,7 +65,7 @@ func SendUpsertRequest(data map[string]any, cfg config.AppConfig, plcApp *app.Ap
 	if err := json.Unmarshal(reply.Data, &result); err != nil {
 		var single VacuumData
 		if err2 := json.Unmarshal(reply.Data, &single); err2 != nil {
-			return nil, fmt.Errorf("failed to parse reply data: %v", err)
+			return nil, fmt.Errorf("[upsert] failed to parse reply data: %v", err)
 		}
 		result = append(result, single)
 	}
@@ -73,17 +73,17 @@ func SendUpsertRequest(data map[string]any, cfg config.AppConfig, plcApp *app.Ap
 	if len(result) > 0 && plcApp != nil {
 		devicesStr := strings.Split(cfg.Plc.PlcDeviceUpsert, ",")
 		if len(devicesStr)%4 != 0 {
-			return nil, fmt.Errorf("invalid device config string")
+			return nil, fmt.Errorf("[upsert] invalid device config string")
 		}
 		dataList := []any{result[0].YStatus, result[0].XStatus, result[0].VacuumStatus}
 		deviceCount := len(devicesStr) / 4
 		if deviceCount != len(dataList) {
-			return nil, fmt.Errorf("mismatch between device count and data count")
+			return nil, fmt.Errorf("[upsert] mismatch between device count and data count")
 		}
 		for i := 0; i < deviceCount; i++ {
 			deviceStr := strings.Join(devicesStr[i*4:i*4+4], ",")
 			if err := plcApp.WritePLC(context.Background(), deviceStr, dataList[i]); err != nil {
-				fmt.Printf("PLC write failed for device %s: %v\n", deviceStr, err)
+				fmt.Printf("[plc] PLC write failed for device %s: %v\n", deviceStr, err)
 				return nil, err
 			}
 		}

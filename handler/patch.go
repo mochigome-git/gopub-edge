@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -13,7 +12,11 @@ import (
 )
 
 func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application) {
-	fmt.Println("All weight triggers are now inactive. Processing the patch.")
+	session.Mutex.Lock()
+	session.IsProcessing = true
+	session.Mutex.Unlock()
+
+	log.Println("[patch] All weight triggers are now inactive. Processing the patch.")
 
 	parts := []map[string]any{}
 	for _, key := range keys {
@@ -29,7 +32,7 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		}
 	}
 	if nullCount > 3 {
-		fmt.Println("Aborting patch: more than 3 null values in data")
+		log.Println("[patch] Aborting patch: more than 3 null values in data")
 		resetWeightTriggers(session)
 		if after != nil {
 			after()
@@ -57,11 +60,11 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	if plcApp != nil {
 		_, err := patch.SendUpsertRequest(envelope, cfg, plcApp, cfg.ReplyTimeout)
 		if err != nil {
-			log.Println("Error sending upsert request:", err)
+			log.Println("[upsert] Error sending upsert request:", err)
 		}
 	} else {
 		if err := patch.SendPatchRequest(envelope); err != nil {
-			log.Println("Error publishing patch request:", err)
+			log.Println("[patch] Error publishing patch request:", err)
 		}
 	}
 
@@ -90,18 +93,23 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	if plcApp != nil {
 		err := plcApp.WritePLC(context.Background(), cfg.Plc.PlcDevice, cfg.Plc.PlcData)
 		if err != nil {
-			fmt.Println("PLC write failed:", err)
+			log.Println("PLC write failed:", err)
 		}
 	}
 }
 
 func shouldPatch(caseID string, ready bool, session *session.Session) bool {
+	session.Mutex.Lock()
+	alreadyProcessing := session.IsProcessing
+	session.Mutex.Unlock()
+	if alreadyProcessing {
+		return false
+	}
+
 	if caseID == "case7" || caseID == "case8" || caseID == "case9" || caseID == "case10" {
-		// Case 7 & Case 8: Wait for all channels to deactivate after being active
 		return !session.WeightTriggerCh1 && !session.WeightTriggerCh2 && !session.WeightTriggerCh3 &&
 			session.PrevWeightTriggerCh1 && session.PrevWeightTriggerCh2 && session.PrevWeightTriggerCh3 && ready
 	}
-	// Default: don't patch
 	return false
 }
 

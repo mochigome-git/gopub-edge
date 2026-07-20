@@ -25,7 +25,7 @@ var Pub *mqttpub.Publisher
 // correlation_id/mode as sibling keys before publishing, no wrapping field.
 func SendPatchRequest(data map[string]any) error {
 	if Pub == nil {
-		return fmt.Errorf("patch: Pub is not initialized (call mqttpub.NewPublisher and set patch.Pub at startup)")
+		return fmt.Errorf("[patch] Pub is not initialized (call mqttpub.NewPublisher and set patch.Pub at startup)")
 	}
 	if err := Pub.Publish(data); err != nil {
 		return fmt.Errorf("failed to publish patch request: %w", err)
