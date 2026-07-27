@@ -2,7 +2,6 @@
 package handler
 
 import (
-	"os"
 	"strings"
 	"time"
 
@@ -14,16 +13,27 @@ import (
 
 func handleJobCase(
 	session *session.Session,
+	tk utils.TriggerKey,
 	jsonPayloads *utils.SafeJsonPayloads,
 	messages []model.Message,
 	cfg config.AppConfig,
 	rMsgJSONChan <-chan string,
 ) {
-	buttonRaw, exists := jsonPayloads.GetFloat64(os.Getenv("CASE_JOB_BUTTON"))
+	// m-coils can come back as float64 or string "1"/"0" — same
+	// ambiguity processChannelTrigger already handles for other cases.
+	buttonVal, exists := jsonPayloads.Get(tk.TriggerKey)
 	if !exists {
 		return
 	}
-	buttonOn := buttonRaw != 0
+	var buttonOn bool
+	switch v := buttonVal.(type) {
+	case float64:
+		buttonOn = v == 1
+	case string:
+		buttonOn = v == "1"
+	default:
+		return
+	}
 
 	session.Mutex.Lock()
 	wasOn := session.JobInProgress
@@ -100,7 +110,7 @@ func handleJobCase(
 			"total_output", "good_output", "reject_output",
 			"job_ref", "started_at", "ended_at",
 		}
-		keys = append(keys, rejectDetailKeys()...) // auto: every CASE_JOB_reject_* env var
+		keys = append(keys, rejectDetailKeys()...)
 
 		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil)
 
