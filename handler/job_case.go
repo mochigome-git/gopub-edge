@@ -108,11 +108,12 @@ func handleJobCase(
 			"operator", "room_temp", "ink_temp",
 			"product_code", "product_name", "filling_code", "filling_date", "ink_name", "ink_lot", "model_name",
 			"total_output", "good_output", "reject_output",
+			"machine_reject_output",
 			"job_ref", "started_at", "ended_at",
 		}
 		keys = append(keys, rejectDetailKeys()...)
 
-		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil)
+		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, true)
 
 		session.Mutex.Lock()
 		session.ProcessedPayloadsMap = make(map[string]map[string]any)

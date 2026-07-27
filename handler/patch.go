@@ -11,7 +11,7 @@ import (
 	"gopub-edge/patch"
 )
 
-func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application) {
+func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, isJob ...bool) {
 	session.Mutex.Lock()
 	session.IsProcessing = true
 	session.Mutex.Unlock()
@@ -41,8 +41,10 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		return
 	}
 
+	job := len(isJob) > 0 && isJob[0]
+
 	var envelope map[string]any
-	if _, isJob := data["job_ref"]; isJob {
+	if job {
 		envelope = buildJobEnvelope(data, cfg)
 	} else {
 		envelope = buildReadingsEnvelope(data, cfg)
