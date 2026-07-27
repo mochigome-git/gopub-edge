@@ -41,7 +41,12 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		return
 	}
 
-	envelope := buildReadingsEnvelope(data, cfg)
+	var envelope map[string]any
+	if _, isJob := data["job_ref"]; isJob {
+		envelope = buildJobEnvelope(data, cfg)
+	} else {
+		envelope = buildReadingsEnvelope(data, cfg)
+	}
 
 	startTime := time.Now()
 

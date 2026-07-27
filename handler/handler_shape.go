@@ -26,6 +26,7 @@ var limitsKeys = map[string]bool{
 	"lower_limit": true,
 	"standard":    true,
 	"upper_limit": true,
+	"target":      true,
 }
 
 // outputKeys: actuator states, derived pass/fail classification, lot/model
@@ -145,4 +146,47 @@ func buildReadingsEnvelope(data map[string]any, cfg config.AppConfig) map[string
 		data["total_count"] = total
 	}
 	return shapeReadingsEnvelope(data, cfg)
+}
+
+// jobOutputKeys: the three fields InsertJobSummary parses directly out of
+// the output jsonb column via output->>'total_output' etc.
+var jobOutputKeys = map[string]bool{
+	"total_output":  true,
+	"good_output":   true,
+	"reject_output": true,
+}
+
+// buildJobEnvelope shapes a completed job's flat merged data for
+// analytics.job_summary. job_ref/started_at/ended_at are pulled out to
+// top-level envelope fields (InsertJobSummary reads these directly off
+// the message struct); everything else — total_output/good_output/
+// reject_output, operator, product/ink identity, reject breakdown —
+// folds into output.
+func buildJobEnvelope(data map[string]any, cfg config.AppConfig) map[string]any {
+	envelope := map[string]any{}
+	if cfg.TenantID != "" {
+		envelope["tenant_id"] = cfg.TenantID
+	}
+	if cfg.DeviceID != "" {
+		envelope["device_id"] = cfg.DeviceID
+	}
+	envelope["kind"] = "job"
+
+	output := map[string]any{}
+	for k, v := range data {
+		switch k {
+		case "job_ref":
+			envelope["job_ref"] = v
+		case "started_at":
+			envelope["started_at"] = v
+		case "ended_at":
+			envelope["ended_at"] = v
+		default:
+			output[k] = v
+		}
+	}
+	if len(output) > 0 {
+		envelope["output"] = output
+	}
+	return envelope
 }

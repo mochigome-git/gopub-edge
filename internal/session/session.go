@@ -2,6 +2,7 @@ package session
 
 import (
 	"sync"
+	"time"
 )
 
 var (
@@ -26,6 +27,10 @@ type Session struct {
 	ProcessedPayloadsMap map[string]map[string]any
 	RemarkNormalStreak   map[string]int
 	Prev                 map[string]any
+
+	// ── job case (充填記録書) ──────────────────────────────────────
+	JobInProgress bool      // true between button ON and OFF
+	JobStartedAt  time.Time // captured at the ON edge, read back at OFF
 }
 
 func NewSession() *Session {
