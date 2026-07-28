@@ -99,7 +99,9 @@ func handleJobCase(
 		storeJobFieldToSession(session, "ended_at", time.Now().UTC().Format(time.RFC3339))
 
 		session.Mutex.Lock()
-		if inklot, ok := session.ProcessedPayloadsMap["ink_lot"]; ok {
+		if fillingCode, ok := session.ProcessedPayloadsMap["filling_code"]; ok && fillingCode["filling_code"] != nil && fillingCode["filling_code"] != "" {
+			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": fillingCode["filling_code"]}
+		} else if inklot, ok := session.ProcessedPayloadsMap["ink_lot"]; ok {
 			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": inklot["ink_lot"]}
 		}
 		session.Mutex.Unlock()
