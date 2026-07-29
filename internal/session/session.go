@@ -31,6 +31,7 @@ type Session struct {
 	// ── job case (充填記録書) ──────────────────────────────────────
 	JobInProgress bool      // true between button ON and OFF
 	JobStartedAt  time.Time // captured at the ON edge, read back at OFF
+	JobEndedAt    time.Time
 }
 
 func NewSession() *Session {
