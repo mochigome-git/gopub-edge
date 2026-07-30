@@ -7,6 +7,7 @@ import (
 	"gopub-edge/internal/utils"
 	"gopub-edge/model"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +146,12 @@ func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonP
 // field (e.g. ink_lot when its PLC registers haven't been written yet)
 // from being force-included in a patch as an empty string, while still
 // letting new fields show up without editing the caller's fixed list.
+var rawRegisterKeyPattern = regexp.MustCompile(`^[dwmy][0-9a-fA-F]+$`)
+
+func isRawRegisterKey(key string) bool {
+	return rawRegisterKeyPattern.MatchString(key)
+}
+
 func resolvePatchKeys(session *session.Session, fixedKeys []string) []string {
 	session.Mutex.Lock()
 	defer session.Mutex.Unlock()
@@ -160,9 +167,10 @@ func resolvePatchKeys(session *session.Session, fixedKeys []string) []string {
 	}
 
 	for k := range session.ProcessedPayloadsMap {
-		if !inFixedList[k] {
-			keys = append(keys, k)
+		if inFixedList[k] || isRawRegisterKey(k) {
+			continue
 		}
+		keys = append(keys, k)
 	}
 
 	return keys
