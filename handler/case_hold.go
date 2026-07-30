@@ -271,7 +271,7 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 	}
 
 	utils.ChangeName(jsonPayloads)
-	utils.ConvertAndStoreModelName(jsonPayloads)
+	utils.ConvertAndStoreMultiStringRegisterFields(jsonPayloads)
 	utils.RemarkMapping(jsonPayloads, session)
 	utils.StoreFlattenedPayloadToSession(jsonPayloads, session)
 
@@ -327,7 +327,7 @@ func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonP
 	}
 
 	utils.ChangeName(jsonPayloads)
-	utils.ConvertAndStoreModelName(jsonPayloads)
+	utils.ConvertAndStoreMultiStringRegisterFields(jsonPayloads)
 	utils.RemarkMapping(jsonPayloads, session)
 	utils.StoreFlattenedPayloadToSession(jsonPayloads, session)
 

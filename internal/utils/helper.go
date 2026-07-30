@@ -240,56 +240,34 @@ func processMessagesOnce(jsonPayloads *SafeJsonPayloads, messages []model.Messag
 	}
 }
 
-// Helper Function to convert and stores 'model_name' value based on the JSON payload
-func ConvertAndStoreModelName(jsonPayloads *SafeJsonPayloads) {
-	type task struct {
-		envPrefix string
-		keyPrefix string
-		count     int
-		outputKey string
+// ConvertAndStoreMultiRegisterFields decodes every CASE_9_<TYPE>_*_RE<n>
+// and CASE_10_<TYPE>_*_RE<n> multi-register string field present in the
+// payload — model_name, ink_lot, or any future field added purely via
+// .env — and stores each under its lowercased output key. Shares
+// discovery/decode logic with job_case.go via
+// utils.ReadDiscoveredMultiRegisterFields; adding or resizing a field
+// is a .env change only, no Go code change needed.
+func ConvertAndStoreMultiStringRegisterFields(jsonPayloads *SafeJsonPayloads) {
+	maxLenOverrides := map[string]int{
+		// carry over any trims the old hardcoded task list implied —
+		// confirm against your real .env register counts before this
+		// ships.
 	}
 
-	tasks := []task{
-		{"CASE_9_MN_", "MODEL_NAME_RE", 5, "model_name"},
-		{"CASE_9_LI_", "INK_LOT_RE", 3, "ink_lot"},
-	}
+	typeMarkers := []string{"STR"}
 
-	// Map to collect which keys are used
-	usedKeys := make(map[string]bool)
-
-	// Process all tasks first
-	for _, t := range tasks {
-		keyTransformations := GetKeyTransformationsFromEnv(t.envPrefix)
-		var builder strings.Builder
-
-		for i := 0; i <= t.count; i++ {
-			envKey := fmt.Sprintf("%s%d", t.keyPrefix, i)
-			deviceKey, ok := keyTransformations[envKey]
-			if !ok {
-				// fmt.Printf("Warning: Missing env key %s\n", envKey)
-				continue
-			}
-			val, ok := jsonPayloads.GetString(deviceKey)
-			if !ok {
-				// fmt.Printf("Warning: Missing payload key %s (from %s)\n", deviceKey, envKey)
-				continue
-			}
-			reversed := reverseString(val)
-			// fmt.Printf("Processing %s → %s → %s → reversed: %s\n", envKey, deviceKey, val, reversed) // Debug
-			builder.WriteString(reversed)
-			usedKeys[deviceKey] = true
+	var allUsedKeys []string
+	for _, prefix := range []string{"CASE_9_", "CASE_10_"} {
+		fields, usedKeys := ReadDiscoveredMultiRegisterFields(
+			jsonPayloads, prefix, typeMarkers, maxLenOverrides,
+		)
+		for key, val := range fields {
+			jsonPayloads.Set(key, val)
 		}
-
-		result := builder.String()
-		if result != "" {
-			cleaned := sanitizeString(result)
-			jsonPayloads.Set(t.outputKey, cleaned)
-		}
-
+		allUsedKeys = append(allUsedKeys, usedKeys...)
 	}
 
-	// Now safely delete used keys
-	for key := range usedKeys {
+	for _, key := range allUsedKeys {
 		jsonPayloads.Delete(key)
 	}
 }

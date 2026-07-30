@@ -57,7 +57,7 @@ aws ecr get-login-password --region "${REGION}" | docker login \
 
 # --- Authenticate Docker ---
 echo "🔐 Logging into Docker Hub..."
-docker login 
+# docker login 
 
 # --- Build multi-arch image ---
 echo "🏗️  Building multi-arch image..."

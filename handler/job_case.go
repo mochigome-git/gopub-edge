@@ -3,7 +3,6 @@ package handler
 
 import (
 	"log"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,12 +23,13 @@ import (
 //	CASE_JOB_LI_INK_LOT_RE0=d1120 ... RE3    -> multi-register (LI)
 //	CASE_JOB_STR_DAILY_CHECK_1_RE0=w8b ...   -> multi-register, nests
 //	                                             into daily_check
-//
-// NOTE: this means renaming the existing CASE_JSON_JOB_STR_*/LI_* env
-// vars to CASE_JOB_STR_*/LI_* — see the .env diff. If you'd rather not
-// touch the .env, tell me and I'll make discoverMultiRegisterSpecs scan
-// both "CASE_JOB_" and "CASE_JSON_JOB_" instead of unifying them.
 const jobFieldPrefix = "CASE_JOB_"
+
+// multiRegisterMaxLenOverrides holds the small number of fields that need
+// an explicit trim because their real digit count is odd relative to
+// register capacity. Empty/missing entries default to 0 (no trim).
+// e.g. multiRegisterMaxLenOverrides["operator"] = 15
+var multiRegisterMaxLenOverrides = map[string]int{}
 
 func handleJobCase(
 	session *session.Session,
@@ -116,8 +116,14 @@ func handleJobCase(
 
 		// Multi-register text fields (_RE0.._REn): operator,
 		// product_code, ink_lot, daily_check_1..4, etc. — discovered
-		// from env, not hardcoded per field.
-		for k, v := range readMultiRegisterFields(jsonPayloads) {
+		// from env, not hardcoded per field. Shared with case10's
+		// ConvertAndStoreModelName via utils.ReadDiscoveredMultiRegisterFields.
+		// job_case doesn't delete consumed keys from jsonPayloads (unlike
+		// case10), so the usedKeys return is discarded here.
+		fields, _ := utils.ReadDiscoveredMultiRegisterFields(
+			jsonPayloads, jobFieldPrefix, []string{"STR", "LI"}, multiRegisterMaxLenOverrides,
+		)
+		for k, v := range fields {
 			if strings.HasPrefix(k, "daily_check_") {
 				dailyCheck[k] = v
 				continue
@@ -192,95 +198,13 @@ func readSingleRegisterFields(jsonPayloads *utils.SafeJsonPayloads) map[string]a
 	result := make(map[string]any)
 	for newKey, oldKey := range transformations {
 		if isMultiRegisterKey(newKey) {
-			continue // handled by readMultiRegisterFields instead
+			continue // handled by utils.ReadDiscoveredMultiRegisterFields instead
 		}
 		if value, exists := jsonPayloads.Get(oldKey); exists {
 			result[newKey] = value
 		}
 	}
 	return result
-}
-
-// multiRegisterSpec describes one CASE_JOB_<TYPE>_<KEY>_RE<n> group.
-type multiRegisterSpec struct {
-	outputKey string // e.g. "operator", "daily_check_1"
-	envPrefix string // e.g. "CASE_JOB_STR_OPERATOR_RE" (kept with trailing "_RE")
-	maxIdx    int    // highest RE index found -> register count = maxIdx+1
-}
-
-// readMultiRegisterFields discovers every multi-register group from env
-// and decodes each with ReadMultiRegisterString. Adding a new
-// multi-register field now only requires adding env vars — no new Go
-// code, no new hardcoded call.
-func readMultiRegisterFields(jsonPayloads *utils.SafeJsonPayloads) map[string]string {
-	result := make(map[string]string)
-	for _, spec := range discoverMultiRegisterSpecs() {
-		// maxLen=0 means "no trim" — sanitizeString already strips
-		// padding, so trimming is only needed for the rare field
-		// whose real digit count is odd relative to register
-		// capacity (e.g. a 15-digit value packed into 8 registers /
-		// 16 bytes). We don't hardcode that per field anymore; if a
-		// specific field turns out to need it, add it to
-		// multiRegisterMaxLenOverrides below instead of guessing.
-		length := multiRegisterMaxLenOverrides[spec.outputKey]
-		val, _ := utils.ReadMultiRegisterString(jsonPayloads, spec.envPrefix, spec.maxIdx, length)
-		if val != "" {
-			result[spec.outputKey] = val
-		}
-	}
-	return result
-}
-
-// multiRegisterMaxLenOverrides holds the small number of fields that need
-// an explicit trim because their real digit count is odd relative to
-// register capacity. Empty/missing entries default to 0 (no trim).
-// e.g. multiRegisterMaxLenOverrides["operator"] = 15
-var multiRegisterMaxLenOverrides = map[string]int{}
-
-func discoverMultiRegisterSpecs() []multiRegisterSpec {
-	groups := map[string]*multiRegisterSpec{}
-
-	for _, env := range os.Environ() {
-		name, _, ok := strings.Cut(env, "=")
-		if !ok || !strings.HasPrefix(name, jobFieldPrefix) {
-			continue
-		}
-		reIdx := strings.LastIndex(name, "_RE")
-		if reIdx < 0 {
-			continue // single-register field, not ours here
-		}
-		idx, err := strconv.Atoi(name[reIdx+3:])
-		if err != nil {
-			continue
-		}
-
-		envPrefix := name[:reIdx+3] // e.g. "CASE_JOB_STR_OPERATOR_RE"
-		outputKey := multiRegisterOutputKey(name[len(jobFieldPrefix):reIdx])
-
-		g, ok := groups[envPrefix]
-		if !ok {
-			g = &multiRegisterSpec{outputKey: outputKey, envPrefix: envPrefix}
-			groups[envPrefix] = g
-		}
-		if idx > g.maxIdx {
-			g.maxIdx = idx
-		}
-	}
-
-	specs := make([]multiRegisterSpec, 0, len(groups))
-	for _, g := range groups {
-		specs = append(specs, *g)
-	}
-	return specs
-}
-
-// multiRegisterOutputKey strips the STR_/LI_ type marker and lowercases
-// the rest: "STR_PRODUCT_CODE" -> "product_code", "LI_INK_LOT" ->
-// "ink_lot", "STR_DAILY_CHECK_1" -> "daily_check_1".
-func multiRegisterOutputKey(raw string) string {
-	raw = strings.TrimPrefix(raw, "STR_")
-	raw = strings.TrimPrefix(raw, "LI_")
-	return strings.ToLower(raw)
 }
 
 func isMultiRegisterKey(name string) bool {
@@ -344,9 +268,7 @@ var dateOnlyComponentSuffixes = []string{"YEAR", "MONTH", "DAY"}
 // readDateOnly combines a group of single-register year/month/day
 // fields — e.g. FILLING_DATE_YEAR/MONTH/DAY — into one time.Time at
 // midnight. Mirrors readDateTime but for fields that carry a date
-// only, no time-of-day component, so there's no need for the
-// STR multi-register decoder — these are plain ints, one per register,
-// exactly like START/END_DATE_TIME_* already are.
+// only, no time-of-day component.
 func readDateOnly(jsonPayloads *utils.SafeJsonPayloads, transformations map[string]string, prefix string) (time.Time, bool) {
 	parts := make([]int, len(dateOnlyComponentSuffixes))
 	for i, suffix := range dateOnlyComponentSuffixes {

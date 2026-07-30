@@ -46,6 +46,7 @@ func Trigger(
 			"weightmcs":         func() { handleWeightMCSCase(session, jsonPayloads, messages, cfg, false, isAccRate, rMsgJSONChan) },
 			// in Trigger(), inside caseHandlers map:
 			"job": func() { handleJobCase(session, tk, jsonPayloads, messages, cfg, rMsgJSONChan) },
+			"lot": func() { handleLotCase(session, tk, jsonPayloads, cfg, rMsgJSONChan) },
 		}
 		// Check if the current caseKey is in the map, and handle accordingly
 		if handler, exists := caseHandlers[tk.CaseKey]; exists {
