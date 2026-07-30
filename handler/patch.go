@@ -24,6 +24,18 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	}
 	data := mergeNonEmptyMaps(parts...)
 
+	// Strip any raw, never-renamed PLC register (d243, w6e, m1540, y54a...)
+	// that reached data via a bucket like "readings" that StoreFlattenedPayloadToSession
+	// sweeps jsonPayloads leftovers into. These are leftovers from
+	// Hold_changeName_generic not deleting its source key after copying
+	// it elsewhere — not legitimate output. Filtering here, post-merge,
+	// catches them regardless of which bucket they were nested under.
+	for k := range data {
+		if isRawRegisterKey(k) {
+			delete(data, k)
+		}
+	}
+
 	// Count top-level nil values
 	nullCount := 0
 	for _, value := range data {
