@@ -80,9 +80,13 @@ func ReadDiscoveredMultiRegisterFields(
 	for _, spec := range DiscoverMultiRegisterSpecs(prefix, typeMarkers) {
 		length := maxLenOverrides[spec.OutputKey]
 		val, usedKeys := ReadMultiRegisterString(jsonPayloads, spec.EnvPrefix, spec.MaxIdx, length)
+		// Always delete the raw registers we just consumed — decoded-blank
+		// is a valid outcome (PLC hasn't written this field yet), not a
+		// reason to leave d1020/w73../etc. sitting around to leak into
+		// readings as raw, half-read register dumps.
+		allUsedKeys = append(allUsedKeys, usedKeys...)
 		if val != "" {
 			result[spec.OutputKey] = val
-			allUsedKeys = append(allUsedKeys, usedKeys...)
 		}
 	}
 	return result, allUsedKeys

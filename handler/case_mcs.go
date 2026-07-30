@@ -194,7 +194,7 @@ func processAndPrint(session *session.Session, key string, jsonPayloads *utils.S
 }
 
 // Helper function to process the trigger for each channel;
-// for CASE 4 & CASE 7 & CASE 9 & CASE 10
+// for CASE 4 & CASE 7  & CASE 10
 func processChannelTrigger(triggerEnvVar, prefix string, jsonPayloads *utils.SafeJsonPayloads,
 	messages []model.Message, session *session.Session) {
 
