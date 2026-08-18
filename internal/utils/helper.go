@@ -320,6 +320,7 @@ func RemarkMapping(jsonPayloads *SafeJsonPayloads, session *session.Session) {
 		14: "BURETTE ISSUE",
 		15: "BUBBLE",
 		16: "NO INK",
+		27: "PRINT TEST",
 	}
 
 	// log.Printf("[Remark] ---- jsonPayloads keys ----")

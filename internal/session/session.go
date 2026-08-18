@@ -35,6 +35,15 @@ type Session struct {
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection
+
+	// ── state case ──────────────────────────────────────
+
+	MachineState       string // "running" | "idle" | "downtime"
+	PreDowntimeState   string // state to restore when downtime ends
+	RunStartWasOn      bool
+	RunStopWasOn       bool
+	DowntimeStartWasOn bool
+	DowntimeStopWasOn  bool
 }
 
 func NewSession() *Session {

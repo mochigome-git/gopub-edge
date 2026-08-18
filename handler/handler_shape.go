@@ -48,7 +48,13 @@ var outputKeys = map[string]bool{
 // concept — rssi, uptime, net_mode) but the bucket is wired up structurally
 // so it's a one-line addition here whenever a field needs it, and so every
 // row keeps the same shape as other producers writing into this table.
-var statusKeys = map[string]bool{}
+var statusKeys = map[string]bool{
+	"machine_state":  true,
+	"machine_start":  true,
+	"machine_stop":   true,
+	"downtime_start": true,
+	"downtime_stop":  true,
+}
 
 // Everything not in limitsKeys/outputKeys/statusKeys falls into readings by
 // default (raw process values: ch1_fica1, ch1_tica1, ch{1,2,3}_weighing,
@@ -188,5 +194,22 @@ func buildJobEnvelope(data map[string]any, cfg config.AppConfig) map[string]any 
 	if len(output) > 0 {
 		envelope["output"] = output
 	}
+	return envelope
+}
+
+// buildLotEnvelope shapes a lot-creation request to match what
+// gokafka-raw's ingest handler expects for kind=="lot": InsertLot reads
+// the target machine off the envelope's top-level device_id field, not
+// off output.machine_id, and not off cfg.DeviceID — that's this edge
+// unit's own identity, unrelated to which machine the lot belongs to.
+func buildLotEnvelope(data map[string]any, cfg config.AppConfig) map[string]any {
+	envelope := map[string]any{}
+	if cfg.TenantID != "" {
+		envelope["tenant_id"] = cfg.TenantID
+	}
+	if machineID, ok := data["machine_id"]; ok {
+		envelope["machine_id"] = machineID
+	}
+	envelope["kind"] = "lot"
 	return envelope
 }

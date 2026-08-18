@@ -174,7 +174,7 @@ func handleJobCase(
 		}
 		session.Mutex.Unlock()
 
-		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, true)
+		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, envelopeJob)
 
 		session.Mutex.Lock()
 		session.ProcessedPayloadsMap = make(map[string]map[string]any)

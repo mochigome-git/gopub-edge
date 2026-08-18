@@ -53,13 +53,11 @@ func handleLotCase(
 	}
 
 	session.Mutex.Lock()
-	session.ProcessedPayloadsMap = map[string]map[string]any{
-		"machine_id": {"machine_id": machineID},
-	}
+	session.ProcessedPayloadsMap["machine_id"] = map[string]any{"machine_id": machineID}
 	keys := []string{"machine_id"}
 	session.Mutex.Unlock()
 
-	processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, true)
+	processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, envelopeLot)
 
 	session.Mutex.Lock()
 	session.ProcessedPayloadsMap = make(map[string]map[string]any)

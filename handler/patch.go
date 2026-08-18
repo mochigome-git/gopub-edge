@@ -11,7 +11,15 @@ import (
 	"gopub-edge/patch"
 )
 
-func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, isJob ...bool) {
+type envelopeKind string
+
+const (
+	envelopeReadings envelopeKind = "readings"
+	envelopeJob      envelopeKind = "job"
+	envelopeLot      envelopeKind = "lot"
+)
+
+func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, kind ...envelopeKind) {
 	session.Mutex.Lock()
 	session.IsProcessing = true
 	session.Mutex.Unlock()
@@ -53,12 +61,18 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 		return
 	}
 
-	job := len(isJob) > 0 && isJob[0]
+	envKind := envelopeReadings
+	if len(kind) > 0 {
+		envKind = kind[0]
+	}
 
 	var envelope map[string]any
-	if job {
+	switch envKind {
+	case envelopeJob:
 		envelope = buildJobEnvelope(data, cfg)
-	} else {
+	case envelopeLot:
+		envelope = buildLotEnvelope(data, cfg)
+	default:
 		envelope = buildReadingsEnvelope(data, cfg)
 	}
 
@@ -90,11 +104,9 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 	prettyPrintJSONWithTime(envelope, time.Since(startTime))
 
 	session.Mutex.Lock()
-	for key := range session.ProcessedPayloadsMap {
+	for _, key := range keys {
 		delete(session.ProcessedPayloadsMap, key)
 	}
-	// Reset remark latch streak counters alongside the payload map so the
-	// next sequence starts fresh.
 	for key := range session.RemarkNormalStreak {
 		delete(session.RemarkNormalStreak, key)
 	}
