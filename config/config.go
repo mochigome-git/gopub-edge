@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -75,6 +76,9 @@ var (
 	// this hop since vacuum-engine runs on the same Pi. Must match
 	// vacuum-engine's MosquittoConfig.RequestTopic exactly.
 	LocalVacuumRequestTopic string
+
+	// Remark label language/set: "gim" (English) or "gcl" (Japanese)
+	RemarkMappingTenant string
 )
 
 // --------------------------------------------------------------------------
@@ -294,6 +298,8 @@ func Load(files ...string) {
 	if TenantID == "" || DeviceID == "" {
 		log.Println("⚠ TENANT_ID and/or DEVICE_ID not set — outgoing readings rows will be missing this identity until you set them")
 	}
+
+	RemarkMappingTenant = strings.ToLower(strings.TrimSpace(getEnv("REMARK_MAPPING_TENANT", "gim")))
 
 	PlcHost = os.Getenv("PLC_HOST")
 	PlcPortStr := getEnv("PLC_PORT", "5011")

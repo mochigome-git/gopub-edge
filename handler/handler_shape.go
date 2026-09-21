@@ -1,9 +1,8 @@
 package handler
 
 import (
-	"strings"
-
 	"gopub-edge/config"
+	"gopub-edge/internal/utils"
 )
 
 // --------------------------------------------------------------------------
@@ -137,7 +136,7 @@ func isNormalRemark(v any) bool {
 	if !ok {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(s), "NORMAL")
+	return utils.IsNormalRemark(s)
 }
 
 // buildReadingsEnvelope is the single entry point every publish call site
