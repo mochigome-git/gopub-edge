@@ -3,6 +3,9 @@ package handler
 
 import (
 	"log"
+	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"gopub-edge/config"
@@ -11,46 +14,64 @@ import (
 	"gopub-edge/model"
 )
 
-// mcsStateFieldPrefix drives the machine run/downtime state machine.
-// Each role is its own env var, so the two pairs (run start/stop,
-// downtime start/stop) can independently be wired to either two
-// separate momentary buttons or a single shared level bit:
+// mcsStateFieldPrefix drives the machine state machine. Register map:
 //
-//	// two separate buttons — each is read as its own rising-edge pulse
+//	// run signal — two momentary buttons (edge) ...
 //	CASE_MCS_STATE_RUN_START=m300
 //	CASE_MCS_STATE_RUN_STOP=m301
-//
-//	// one physical bit doing both jobs — point both roles at the SAME
-//	// register; the handler detects this and falls back to ON/OFF
-//	// level semantics (bit=1 -> running, bit=0 -> idle), same pattern
-//	// job_case.go uses for its single job button
+//	// ... or one level bit (point both at the SAME register, or omit RUN_STOP)
 //	CASE_MCS_STATE_RUN_START=m300
-//	CASE_MCS_STATE_RUN_STOP=m300
 //
-// The exact same rule applies to CASE_MCS_STATE_DOWNTIME_START /
-// CASE_MCS_STATE_DOWNTIME_STOP. DOWNTIME_* is optional — if you don't
-// configure it, the case only ever reports running/idle.
+//	// optional operator downtime button — same edge/level rule
+//	CASE_MCS_STATE_DOWNTIME_START=m302
+//	CASE_MCS_STATE_DOWNTIME_STOP=m303
+//
+//	// optional fault bits — any bit ON puts the machine in downtime with
+//	// reason "fault"; the part after ALARM_ is the alarm code sent in
+//	// alarms[] (lower-cased)
+//	CASE_MCS_STATE_ALARM_ethercat_link_lost=m310
+//	CASE_MCS_STATE_ALARM_servo_overload=m311
+//
+// Every poll the handler works out ONE target state from the inputs
+// (fault > downtime button > run > idle) and, if it differs from the
+// current state, publishes ONE transition message shaped for
+// analytics.fn_track_machine_state_event:
+//
+//	{ "machine_state": "running", "machine_start": "...",
+//	  "prev_state": "downtime", "prev_duration_sec": 300 }
+//	{ "machine_state": "idle", "machine_stop": "...",
+//	  "run_duration_sec": 39, "prev_state": "running", "prev_duration_sec": 39 }
+//	{ "machine_state": "downtime", "machine_stop": "...", "run_duration_sec": 39,
+//	  "reason": "fault", "alarms": ["ethercat_link_lost"],
+//	  "prev_state": "running", "prev_duration_sec": 39 }
+//	{ "machine_state": "downtime", "state_changed_at": "...",
+//	  "reason": "button", "prev_state": "idle", "prev_duration_sec": 120 }
+//
+// A fault while running goes straight to downtime in one message (no
+// idle-then-downtime pair), so the DB never has to reclassify.
+// After a gopub-edge restart the first transition carries no prev_*
+// fields, so the DB doesn't try to repair a gap that didn't happen.
 const mcsStateFieldPrefix = "CASE_MCS_STATE_"
+
+const mcsAlarmPrefix = "ALARM_"
 
 const (
 	mcsStateRunning  = "running"
 	mcsStateIdle     = "idle"
 	mcsStateDowntime = "downtime"
+
+	mcsReasonFault  = "fault"
+	mcsReasonButton = "button"
 )
 
-// ─────────────────────────────────────────────────────────────────────────
-// REQUIRED session.Session additions (add these to internal/session):
-//
-//	MachineState       string    // "running" | "idle" | "downtime"
-//	PreDowntimeState   string    // state to restore when downtime ends
-//	RunStartWasOn      bool
-//	RunStopWasOn       bool
-//	DowntimeStartWasOn bool
-//	DowntimeStopWasOn  bool
-//
-// These follow the same edge-tracking pattern as JobInProgress in
-// session.Session already used by job_case.go.
-// ─────────────────────────────────────────────────────────────────────────
+// UTC, millisecond precision — same shape the dashboard mocks send.
+const mcsTimeLayout = "2006-01-02T15:04:05.000Z"
+
+type mcsTarget struct {
+	state  string
+	reason string
+	alarms []string
+}
 
 func handleMCSStateCase(
 	sess *session.Session,
@@ -60,51 +81,58 @@ func handleMCSStateCase(
 	cfg config.AppConfig,
 	rMsgJSONChan <-chan string,
 ) {
-	transformations := utils.GetKeyTransformationsFromEnv(mcsStateFieldPrefix)
+	tr := utils.GetKeyTransformationsFromEnv(mcsStateFieldPrefix)
 
-	runStartKey, hasRunStart := transformations["RUN_START"]
-	runStopKey, hasRunStop := transformations["RUN_STOP"]
-	downStartKey, hasDownStart := transformations["DOWNTIME_START"]
-	downStopKey, hasDownStop := transformations["DOWNTIME_STOP"]
-
+	runStartKey, hasRunStart := tr["RUN_START"]
 	if !hasRunStart {
 		log.Printf("handleMCSStateCase: no RUN_START register configured (CASE_MCS_STATE_RUN_START) — skipping")
 		return
 	}
+	runStopKey, hasRunStop := tr["RUN_STOP"]
+	downStartKey, hasDownStart := tr["DOWNTIME_START"]
+	downStopKey, hasDownStop := tr["DOWNTIME_STOP"]
 
-	var keys []string
+	runEdge := hasRunStop && runStopKey != runStartKey
 
-	// ── Run state (running / idle) ──────────────────────────────────
-	if hasRunStop && runStopKey != runStartKey {
-		keys = append(keys, handleRunEdgeButtons(sess, jsonPayloads, runStartKey, runStopKey)...)
+	// 1. Update the inputs from this poll.
+	if runEdge {
+		updateRunEdge(sess, jsonPayloads, runStartKey, runStopKey)
 	} else {
-		keys = append(keys, handleRunLevelButton(sess, jsonPayloads, runStartKey)...)
+		updateRunLevel(sess, jsonPayloads, runStartKey)
 	}
-
-	// ── Downtime overlay (optional) ─────────────────────────────────
 	if hasDownStart {
 		if hasDownStop && downStopKey != downStartKey {
-			keys = append(keys, handleDowntimeEdgeButtons(sess, jsonPayloads, downStartKey, downStopKey)...)
+			updateDowntimeEdge(sess, jsonPayloads, downStartKey, downStopKey)
 		} else {
-			keys = append(keys, handleDowntimeLevelButton(sess, jsonPayloads, downStartKey)...)
+			updateDowntimeLevel(sess, jsonPayloads, downStartKey)
 		}
 	}
+	updateAlarms(sess, jsonPayloads, tr)
 
+	// 2. Until the run signal has been seen at least once we don't know
+	//    whether the machine is running, so don't report anything.
+	sess.Mutex.Lock()
+	known := sess.StateKnown
+	sess.Mutex.Unlock()
+	if !known {
+		return
+	}
+
+	// 3. One target state, one transition.
+	target := resolveTarget(sess, runEdge)
+	keys := applyTransition(sess, target, time.Now().UTC())
 	if len(keys) == 0 {
 		return
 	}
 
-	// machine_state changed at least once this poll — always include it.
-	keys = append([]string{"machine_state"}, keys...)
-
-	// false: these fields belong in the readings table (buildReadingsEnvelope
-	// -> status bucket, see statusKeys in envelope.go), not analytics.job_summary
-	// (buildJobEnvelope), which is what the trailing `true` selects for job_case.
+	// Readings envelope: every key here is in statusKeys (handler_shape.go),
+	// so they land in the status jsonb the trigger reads.
 	processPatch(sess, keys, cfg, nil, rMsgJSONChan, nil)
 }
 
-// readBoolField mirrors the button-value coercion job_case.go uses for
-// its trigger button, applied here per register key.
+// ── Inputs ────────────────────────────────────────────────────────────────
+
+// readBoolField mirrors the button-value coercion job_case.go uses.
 func readBoolField(jsonPayloads *utils.SafeJsonPayloads, key string) (bool, bool) {
 	raw, exists := jsonPayloads.Get(key)
 	if !exists {
@@ -123,183 +151,198 @@ func readBoolField(jsonPayloads *utils.SafeJsonPayloads, key string) (bool, bool
 	}
 }
 
-func setMachineState(sess *session.Session, state string) {
-	sess.Mutex.Lock()
-	sess.MachineState = state
-	sess.Mutex.Unlock()
-	storeJobFieldToSession(sess, "machine_state", state)
-}
-
-func stampField(sess *session.Session, field string) {
-	storeJobFieldToSession(sess, field, time.Now().UTC().Format(time.RFC3339))
-}
-
-// handleRunLevelButton: single shared bit for RUN_START/RUN_STOP — a
-// level signal that stays 1 while running and drops to 0 otherwise.
-// Rising edge -> running, falling edge -> idle. If downtime is active,
-// the run/idle transition is remembered (PreDowntimeState) but not
-// surfaced, so downtime ending hands control back to the right state.
-func handleRunLevelButton(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, key string) []string {
-	on, exists := readBoolField(jsonPayloads, key)
-	if !exists {
-		return nil
+// updateRunLevel: one bit, 1 = running.
+func updateRunLevel(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, key string) {
+	on, ok := readBoolField(jsonPayloads, key)
+	if !ok {
+		return
 	}
-
 	sess.Mutex.Lock()
-	wasOn := sess.RunStartWasOn
+	sess.RunRequested = on
 	sess.RunStartWasOn = on
-	inDowntime := sess.MachineState == mcsStateDowntime
+	sess.StateKnown = true
 	sess.Mutex.Unlock()
-
-	switch {
-	case on && !wasOn:
-		if inDowntime {
-			sess.Mutex.Lock()
-			sess.PreDowntimeState = mcsStateRunning
-			sess.Mutex.Unlock()
-			return nil
-		}
-		setMachineState(sess, mcsStateRunning)
-		stampField(sess, "machine_start")
-		return []string{"machine_start"}
-	case !on && wasOn:
-		if inDowntime {
-			sess.Mutex.Lock()
-			sess.PreDowntimeState = mcsStateIdle
-			sess.Mutex.Unlock()
-			return nil
-		}
-		setMachineState(sess, mcsStateIdle)
-		stampField(sess, "machine_stop")
-		return []string{"machine_stop"}
-	}
-	return nil
 }
 
-// handleRunEdgeButtons: separate RUN_START / RUN_STOP momentary
-// buttons. Each firing is an independent event.
-func handleRunEdgeButtons(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, startKey, stopKey string) []string {
-	startOn, startExists := readBoolField(jsonPayloads, startKey)
-	stopOn, stopExists := readBoolField(jsonPayloads, stopKey)
+// updateRunEdge: separate momentary START / STOP buttons. If both fire in
+// the same poll, STOP wins.
+func updateRunEdge(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, startKey, stopKey string) {
+	startOn, startOK := readBoolField(jsonPayloads, startKey)
+	stopOn, stopOK := readBoolField(jsonPayloads, stopKey)
 
 	sess.Mutex.Lock()
-	startWasOn := sess.RunStartWasOn
-	stopWasOn := sess.RunStopWasOn
-	if startExists {
+	defer sess.Mutex.Unlock()
+
+	if startOK {
+		if startOn && !sess.RunStartWasOn {
+			sess.RunRequested = true
+			sess.StateKnown = true
+		}
 		sess.RunStartWasOn = startOn
 	}
-	if stopExists {
+	if stopOK {
+		if stopOn && !sess.RunStopWasOn {
+			sess.RunRequested = false
+			sess.StateKnown = true
+		}
 		sess.RunStopWasOn = stopOn
 	}
-	inDowntime := sess.MachineState == mcsStateDowntime
-	sess.Mutex.Unlock()
-
-	var keys []string
-
-	if startExists && startOn && !startWasOn {
-		if inDowntime {
-			sess.Mutex.Lock()
-			sess.PreDowntimeState = mcsStateRunning
-			sess.Mutex.Unlock()
-		} else {
-			setMachineState(sess, mcsStateRunning)
-			stampField(sess, "machine_start")
-			keys = append(keys, "machine_start")
-		}
-	}
-
-	if stopExists && stopOn && !stopWasOn {
-		if inDowntime {
-			sess.Mutex.Lock()
-			sess.PreDowntimeState = mcsStateIdle
-			sess.Mutex.Unlock()
-		} else {
-			setMachineState(sess, mcsStateIdle)
-			stampField(sess, "machine_stop")
-			keys = append(keys, "machine_stop")
-		}
-	}
-
-	return keys
 }
 
-// handleDowntimeLevelButton: single shared bit for downtime start/stop.
-func handleDowntimeLevelButton(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, key string) []string {
-	on, exists := readBoolField(jsonPayloads, key)
-	if !exists {
-		return nil
+// updateDowntimeLevel: one bit, 1 = operator downtime.
+func updateDowntimeLevel(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, key string) {
+	on, ok := readBoolField(jsonPayloads, key)
+	if !ok {
+		return
 	}
-
 	sess.Mutex.Lock()
-	wasOn := sess.DowntimeStartWasOn
+	sess.DowntimeRequested = on
 	sess.DowntimeStartWasOn = on
-	current := sess.MachineState
 	sess.Mutex.Unlock()
-
-	if on && !wasOn && current != mcsStateDowntime {
-		sess.Mutex.Lock()
-		sess.PreDowntimeState = current
-		sess.Mutex.Unlock()
-		setMachineState(sess, mcsStateDowntime)
-		stampField(sess, "downtime_start")
-		return []string{"downtime_start"}
-	}
-
-	if !on && wasOn && current == mcsStateDowntime {
-		sess.Mutex.Lock()
-		restore := sess.PreDowntimeState
-		sess.Mutex.Unlock()
-		if restore == "" {
-			restore = mcsStateIdle
-		}
-		setMachineState(sess, restore)
-		stampField(sess, "downtime_stop")
-		return []string{"downtime_stop"}
-	}
-
-	return nil
 }
 
-// handleDowntimeEdgeButtons: separate DOWNTIME_START / DOWNTIME_STOP
-// momentary buttons.
-func handleDowntimeEdgeButtons(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, startKey, stopKey string) []string {
-	startOn, startExists := readBoolField(jsonPayloads, startKey)
-	stopOn, stopExists := readBoolField(jsonPayloads, stopKey)
+// updateDowntimeEdge: separate momentary DOWNTIME_START / DOWNTIME_STOP.
+func updateDowntimeEdge(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, startKey, stopKey string) {
+	startOn, startOK := readBoolField(jsonPayloads, startKey)
+	stopOn, stopOK := readBoolField(jsonPayloads, stopKey)
 
 	sess.Mutex.Lock()
-	startWasOn := sess.DowntimeStartWasOn
-	stopWasOn := sess.DowntimeStopWasOn
-	if startExists {
+	defer sess.Mutex.Unlock()
+
+	if startOK {
+		if startOn && !sess.DowntimeStartWasOn {
+			sess.DowntimeRequested = true
+		}
 		sess.DowntimeStartWasOn = startOn
 	}
-	if stopExists {
+	if stopOK {
+		if stopOn && !sess.DowntimeStopWasOn {
+			sess.DowntimeRequested = false
+		}
 		sess.DowntimeStopWasOn = stopOn
 	}
-	current := sess.MachineState
+}
+
+// updateAlarms reads every CASE_MCS_STATE_ALARM_<code> bit present in this
+// poll. A bit missing from the poll keeps its last value, so a partial
+// cycle doesn't clear an active fault.
+func updateAlarms(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, tr map[string]string) {
+	for name, reg := range tr {
+		if !strings.HasPrefix(name, mcsAlarmPrefix) {
+			continue
+		}
+		code := strings.ToLower(strings.TrimPrefix(name, mcsAlarmPrefix))
+		if code == "" {
+			continue
+		}
+		on, ok := readBoolField(jsonPayloads, reg)
+		if !ok {
+			continue
+		}
+		sess.Mutex.Lock()
+		if sess.AlarmOn == nil {
+			sess.AlarmOn = make(map[string]bool)
+		}
+		sess.AlarmOn[code] = on
+		sess.Mutex.Unlock()
+	}
+}
+
+// ── State machine ─────────────────────────────────────────────────────────
+
+// resolveTarget: fault > downtime button > run > idle.
+func resolveTarget(sess *session.Session, runEdge bool) mcsTarget {
+	sess.Mutex.Lock()
+	defer sess.Mutex.Unlock()
+
+	var active []string
+	for code, on := range sess.AlarmOn {
+		if on {
+			active = append(active, code)
+		}
+	}
+	sort.Strings(active)
+
+	switch {
+	case len(active) > 0:
+		// With momentary buttons nothing tells us the machine stopped, so
+		// a fault cancels the run request: after the fault clears the
+		// machine is idle until START is pressed again. With a level bit
+		// the PLC's own run bit stays the truth.
+		if runEdge {
+			sess.RunRequested = false
+		}
+		return mcsTarget{state: mcsStateDowntime, reason: mcsReasonFault, alarms: active}
+	case sess.DowntimeRequested:
+		return mcsTarget{state: mcsStateDowntime, reason: mcsReasonButton}
+	case sess.RunRequested:
+		return mcsTarget{state: mcsStateRunning}
+	default:
+		return mcsTarget{state: mcsStateIdle}
+	}
+}
+
+// applyTransition moves the session to target (if it changed), stores the
+// transition fields in the session and returns their keys for processPatch.
+func applyTransition(sess *session.Session, t mcsTarget, now time.Time) []string {
+	sess.Mutex.Lock()
+	prev := sess.MachineState
+	since := sess.StateSince
+	if prev == t.state {
+		sess.Mutex.Unlock()
+		return nil
+	}
+	sess.MachineState = t.state
+	sess.StateSince = now
 	sess.Mutex.Unlock()
 
-	var keys []string
+	ts := now.Format(mcsTimeLayout)
+	fields := map[string]any{"machine_state": t.state}
 
-	if startExists && startOn && !startWasOn && current != mcsStateDowntime {
-		sess.Mutex.Lock()
-		sess.PreDowntimeState = current
-		sess.Mutex.Unlock()
-		setMachineState(sess, mcsStateDowntime)
-		stampField(sess, "downtime_start")
-		keys = append(keys, "downtime_start")
+	// Timestamp key the trigger reads for each case.
+	switch {
+	case t.state == mcsStateRunning:
+		fields["machine_start"] = ts
+	case prev == mcsStateRunning:
+		fields["machine_stop"] = ts // running -> idle / downtime
+	default:
+		fields["state_changed_at"] = ts // idle <-> downtime, downtime -> idle, cold start
 	}
 
-	if stopExists && stopOn && !stopWasOn && current == mcsStateDowntime {
-		sess.Mutex.Lock()
-		restore := sess.PreDowntimeState
-		sess.Mutex.Unlock()
-		if restore == "" {
-			restore = mcsStateIdle
+	// prev_* only when we actually saw the previous state start
+	// (not on the first transition after a restart).
+	if prev != "" && !since.IsZero() {
+		d := math.Round(now.Sub(since).Seconds())
+		fields["prev_state"] = prev
+		fields["prev_duration_sec"] = d
+		if prev == mcsStateRunning {
+			fields["run_duration_sec"] = d
 		}
-		setMachineState(sess, restore)
-		stampField(sess, "downtime_stop")
-		keys = append(keys, "downtime_stop")
 	}
 
+	if t.state == mcsStateDowntime {
+		fields["reason"] = t.reason
+		if len(t.alarms) > 0 {
+			fields["alarms"] = t.alarms
+		}
+	}
+
+	keys := make([]string, 0, len(fields))
+	keys = append(keys, "machine_state")
+	for k, v := range fields {
+		storeJobFieldToSession(sess, k, v)
+		if k != "machine_state" {
+			keys = append(keys, k)
+		}
+	}
+
+	log.Printf("handleMCSStateCase: %s -> %s %v", orDash(prev), t.state, fields)
 	return keys
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }

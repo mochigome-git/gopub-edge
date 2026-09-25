@@ -37,9 +37,12 @@ type Session struct {
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection
 
 	// ── state case ──────────────────────────────────────
-
-	MachineState       string // "running" | "idle" | "downtime"
-	PreDowntimeState   string // state to restore when downtime ends
+	MachineState       string    // "running" | "idle" | "downtime"
+	StateSince         time.Time // when MachineState began (for prev_duration_sec)
+	StateKnown         bool      // run signal read at least once since start
+	RunRequested       bool
+	DowntimeRequested  bool
+	AlarmOn            map[string]bool // alarm code -> bit state
 	RunStartWasOn      bool
 	RunStopWasOn       bool
 	DowntimeStartWasOn bool

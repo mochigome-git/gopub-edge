@@ -48,11 +48,17 @@ var outputKeys = map[string]bool{
 // so it's a one-line addition here whenever a field needs it, and so every
 // row keeps the same shape as other producers writing into this table.
 var statusKeys = map[string]bool{
-	"machine_state":  true,
-	"machine_start":  true,
-	"machine_stop":   true,
-	"downtime_start": true,
-	"downtime_stop":  true,
+	"machine_state":     true,
+	"machine_start":     true,
+	"machine_stop":      true,
+	"downtime_start":    true,
+	"downtime_stop":     true,
+	"state_changed_at":  true,
+	"prev_state":        true,
+	"prev_duration_sec": true,
+	"run_duration_sec":  true,
+	"reason":            true,
+	"alarms":            true,
 }
 
 // Everything not in limitsKeys/outputKeys/statusKeys falls into readings by
@@ -132,11 +138,8 @@ func countRemarks(data map[string]any) (good, reject, total int) {
 // ("OVERLOAD", "PUNCHING MISS/ NO BALL", "BUBBLE", "NO INK", etc.) for a
 // reject. Any non-string, or any string other than "NORMAL", counts as reject.
 func isNormalRemark(v any) bool {
-	s, ok := v.(string)
-	if !ok {
-		return false
-	}
-	return utils.IsNormalRemark(s)
+	code, ok := utils.RemarkToInt(v) // export remarkToInt
+	return ok && code == 0
 }
 
 // buildReadingsEnvelope is the single entry point every publish call site
