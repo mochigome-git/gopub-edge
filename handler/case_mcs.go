@@ -96,11 +96,7 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 // them in as ""), while still picking up any field outside the fixed
 // list automatically.
 func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message,
-	cfg config.AppConfig, chance bool, checkAccumulateRate AccumCheckFunc, rMsgJSONChan <-chan string) {
-
-	if checkAccumulateRate() {
-		chance = true
-	}
+	cfg config.AppConfig, rMsgJSONChan <-chan string) {
 
 	// Process to handling counter when ch1 started
 	processChannelTrigger("CASE_4_TRIGGER_CH1", "counterch_", jsonPayloads, messages, session)
@@ -126,7 +122,7 @@ func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonP
 	// Check if all weight triggers (CH1, CH2, CH3) are inactive, but were previously active
 
 	processWeightTriggers(session, jsonPayloads, messages)
-	if shouldPatch("case10", chance, session) {
+	if shouldPatch("case10", true, session) {
 
 		var case10PatchKeys = []string{
 			"ch1_", "ch2_", "ch3_", "vacuum", "weightch1_", "weightch2_", "weightch3_",

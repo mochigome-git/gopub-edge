@@ -109,6 +109,10 @@ func GetMqttConfig() MqttConfig {
 		ECScaCert:     ECScaCert,
 		ECSclientCert: ECSclientCert,
 		ECSclientKey:  ECSclientKey,
+
+		CycleModeEnabled: CycleModeEnabled,
+		CycleAnchorTopic: CycleAnchorTopic,
+		CycleTimeout:     CycleTimeout,
 	}
 }
 

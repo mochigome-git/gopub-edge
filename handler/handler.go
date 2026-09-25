@@ -43,7 +43,7 @@ func Trigger(
 			"holdfillingweight": func() { handleHoldFillingWeightCase(session, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			"holdmcs":           func() { handleHoldMCSCase(session, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			"vacuum":            func() { handleVacuumCase(session, jsonPayloads, cfg, rMsgJSONChan, plcApp) },
-			"weightmcs":         func() { handleWeightMCSCase(session, jsonPayloads, messages, cfg, false, isAccRate, rMsgJSONChan) },
+			"weightmcs":         func() { handleWeightMCSCase(session, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			// in Trigger(), inside caseHandlers map:
 			"job":      func() { handleJobCase(session, tk, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			"lot":      func() { handleLotCase(session, tk, jsonPayloads, cfg, rMsgJSONChan) },
