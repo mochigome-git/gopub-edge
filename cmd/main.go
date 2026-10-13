@@ -145,6 +145,7 @@ func main() {
 
 	// Initiate graceful shutdown
 	close(stopHeartbeat)
+	handler.StopTimeseries()
 	close(stopProcessing)
 	// Wait for client to finish
 	<-clientDone

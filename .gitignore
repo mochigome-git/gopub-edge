@@ -21,3 +21,4 @@ certs/*
 root/certs/*
 # Go workspace file
 go.work
+.env.local*
