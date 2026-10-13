@@ -9,6 +9,7 @@
 *.log
 .env
 .env.local
+.env.local.dev
 
 # Test binary, built with `go test -c`
 *.test
