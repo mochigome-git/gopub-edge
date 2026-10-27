@@ -14,6 +14,7 @@ type Session struct {
 	Mutex                sync.Mutex // Sync to protect session.ProcessedPayloadsMap
 	PrevSealing          float64    // To store the trigger of condition judgement in case 4
 	IsProcessing         bool       // Flag to track if the process is active
+	FillArmed            bool       // CASE 9 holdmcs fill-cycle latch; separate from IsProcessing, which shouldPatch reads as "patch in flight"
 	AllSuccessZero       bool
 	WeightTriggerCh1     bool
 	WeightTriggerCh2     bool
