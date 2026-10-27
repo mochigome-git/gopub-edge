@@ -41,8 +41,11 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 				session.ProcessedPayloadsMap[channel] = make(map[string]any)
 			}
 			session.ProcessedPayloadsMap[channel][channel+"_fill"] = 1
+			// Arm with FillArmed, NOT IsProcessing: shouldPatch returns false
+			// whenever IsProcessing is true, so arming with it meant the
+			// patch block below could never fire.
+			session.FillArmed = true
 			session.Mutex.Unlock()
-			session.IsProcessing = true
 		}
 	}
 
@@ -58,7 +61,11 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 	ch3, ok3 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch3"))
 	session.AllSuccessZero = ok1 && ok2 && ok3 && ch1 == 0 && ch2 == 0 && ch3 == 0
 
-	if session.AllSuccessZero && session.IsProcessing {
+	session.Mutex.Lock()
+	armed := session.FillArmed
+	session.Mutex.Unlock()
+
+	if session.AllSuccessZero && armed {
 		prevDo := false
 		session.ProcessedPayloadsMap["do"] = utils.ProcessTriggerGeneric(jsonPayloads, messages, func(payload *utils.SafeJsonPayloads) map[string]any {
 			prevDo = true
@@ -80,7 +87,12 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 			}
 
 			keys := resolvePatchKeys(session, case9PatchKeys)
-			processPatch(session, keys, cfg, func() { prevDo = false }, rMsgJSONChan, nil)
+			processPatch(session, keys, cfg, func() {
+				prevDo = false
+				session.Mutex.Lock()
+				session.FillArmed = false
+				session.Mutex.Unlock()
+			}, rMsgJSONChan, nil)
 		}
 
 	}
