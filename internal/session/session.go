@@ -33,6 +33,11 @@ type Session struct {
 	JobInProgress bool      // true between button ON and OFF
 	JobStartedAt  time.Time // captured at the ON edge, read back at OFF
 	JobEndedAt    time.Time
+	// true when the value came from PLC registers (local factory wall-clock,
+	// no zone) rather than time.Now() (a real UTC instant). The database
+	// applies the tenant's timezone to PLC values — see formatJobTime.
+	JobStartedFromPLC bool
+	JobEndedFromPLC   bool
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection

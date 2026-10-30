@@ -65,6 +65,8 @@ func handleJobCase(
 		session.JobInProgress = true
 		session.JobStartedAt = time.Now().UTC()
 		session.JobEndedAt = time.Time{}
+		session.JobStartedFromPLC = false
+		session.JobEndedFromPLC = false
 		session.ProcessedPayloadsMap = make(map[string]map[string]any)
 		session.Mutex.Unlock()
 	}
@@ -91,6 +93,7 @@ func handleJobCase(
 		if t, ok := readDateTime(jsonPayloads, transformations, "START_DATE_TIME_"); ok {
 			session.Mutex.Lock()
 			session.JobStartedAt = t
+			session.JobStartedFromPLC = true
 			session.Mutex.Unlock()
 		}
 
@@ -103,6 +106,7 @@ func handleJobCase(
 		if t, ok := readDateTime(jsonPayloads, transformations, "END_DATE_TIME_"); ok {
 			session.Mutex.Lock()
 			session.JobEndedAt = t
+			session.JobEndedFromPLC = true
 			session.Mutex.Unlock()
 		}
 
@@ -141,6 +145,8 @@ func handleJobCase(
 		session.Mutex.Lock()
 		startedAt := session.JobStartedAt
 		endedAt := session.JobEndedAt // last value captured during ON, may be zero
+		startedFromPLC := session.JobStartedFromPLC
+		endedFromPLC := session.JobEndedFromPLC
 		session.JobInProgress = false
 		session.Mutex.Unlock()
 
@@ -148,13 +154,15 @@ func handleJobCase(
 		// final write lands on this exact message.
 		if t, ok := readDateTime(jsonPayloads, utils.GetKeyTransformationsFromEnv(jobFieldPrefix), "END_DATE_TIME_"); ok {
 			endedAt = t
+			endedFromPLC = true
 		}
 		if endedAt.IsZero() {
 			log.Printf("handleJobCase: END_DATE_TIME_* never captured during job — falling back to time.Now() for ended_at")
 			endedAt = time.Now().UTC()
+			endedFromPLC = false
 		}
-		storeJobFieldToSession(session, "started_at", startedAt.Format(time.RFC3339))
-		storeJobFieldToSession(session, "ended_at", endedAt.Format(time.RFC3339))
+		storeJobFieldToSession(session, "started_at", formatJobTime(startedAt, startedFromPLC))
+		storeJobFieldToSession(session, "ended_at", formatJobTime(endedAt, endedFromPLC))
 
 		session.Mutex.Lock()
 		if fc, ok := session.ProcessedPayloadsMap["filling_code"]; ok && fc["filling_code"] != nil && fc["filling_code"] != "" {
@@ -225,13 +233,31 @@ func isDateTimeComponentField(name string) bool {
 // <prefix>_DATE_TIME_ group must have to be readable.
 var dateTimeComponentSuffixes = []string{"YEAR", "MONTH", "DAY", "HOUR", "MIN", "SEC"}
 
+// plcLocalLayout is how PLC wall-clock times are sent: deliberately with
+// NO offset. The edge doesn't know which timezone the factory is in — the
+// tenant's timezone lives in public.tenants.timezone, and gokafka-raw's
+// insert interprets offset-less values in that zone. Times this service
+// generates itself (time.Now()) are real instants and keep their "Z".
+const plcLocalLayout = "2006-01-02T15:04:05"
+
+// formatJobTime renders a job timestamp for the envelope: PLC wall-clock
+// without an offset, or a UTC instant in RFC3339.
+func formatJobTime(t time.Time, fromPLC bool) string {
+	if fromPLC {
+		return t.Format(plcLocalLayout)
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // readDateTime combines a group of single-register fields — e.g.
 // START_DATE_TIME_YEAR/MONTH/DAY/HOUR/MIN/SEC — into one time.Time.
 // Returns ok=false if any component is missing or unreadable, so the
 // caller can fall back to time.Now().
 //
-// ASSUMPTION: registers hold local factory time, not UTC — swap
-// time.Local for time.UTC below if the PLC clock is already UTC.
+// The registers hold local factory wall-clock time. The returned value
+// carries a placeholder UTC zone that is never sent — formatJobTime
+// strips it, and the database applies the tenant's timezone. Do not
+// compare it against time.Now() instants.
 func readDateTime(jsonPayloads *utils.SafeJsonPayloads, transformations map[string]string, prefix string) (time.Time, bool) {
 	parts := make([]int, len(dateTimeComponentSuffixes))
 	for i, suffix := range dateTimeComponentSuffixes {
@@ -258,7 +284,7 @@ func readDateTime(jsonPayloads *utils.SafeJsonPayloads, transformations map[stri
 		return time.Time{}, false
 	}
 
-	return time.Date(year, time.Month(month), day, parts[3], parts[4], parts[5], 0, time.Local), true
+	return time.Date(year, time.Month(month), day, parts[3], parts[4], parts[5], 0, time.UTC), true
 }
 
 // dateOnlyComponentSuffixes is the fixed set of parts every plain
@@ -293,7 +319,9 @@ func readDateOnly(jsonPayloads *utils.SafeJsonPayloads, transformations map[stri
 		return time.Time{}, false
 	}
 
-	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.Local), true
+	// Calendar date only; UTC midnight is just the carrier, so the date
+	// never shifts with the container's TZ setting.
+	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC), true
 }
 
 func toInt(v any) (int, bool) {
