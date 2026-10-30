@@ -135,6 +135,13 @@ func handleJobCase(
 			storeJobFieldToSession(session, k, v)
 		}
 
+		// 4-register signed 64-bit numbers (HMI 数値入力, 符号付きBIN64):
+		// product_code, filling_code — CASE_JOB_I64_<KEY>_RE0..RE3.
+		int64Fields, _ := utils.ReadDiscoveredInt64Fields(jsonPayloads, jobFieldPrefix)
+		for k, v := range int64Fields {
+			storeJobFieldToSession(session, k, v)
+		}
+
 		if len(dailyCheck) > 0 {
 			storeJobFieldToSession(session, "daily_check", dailyCheck)
 		}
@@ -216,7 +223,8 @@ func readSingleRegisterFields(jsonPayloads *utils.SafeJsonPayloads) map[string]a
 }
 
 func isMultiRegisterKey(name string) bool {
-	return strings.HasPrefix(name, "STR_") || strings.HasPrefix(name, "LI_")
+	return strings.HasPrefix(name, "STR_") || strings.HasPrefix(name, "LI_") ||
+		strings.HasPrefix(name, "I64_")
 }
 
 // isDateTimeComponentField matches CASE_JOB_START_DATE_TIME_* and

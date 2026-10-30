@@ -23,6 +23,17 @@ type MultiRegisterSpec struct {
 func DiscoverMultiRegisterSpecs(prefix string, typeMarkers []string) []MultiRegisterSpec {
 	groups := map[string]*MultiRegisterSpec{}
 
+	// I64_ groups are numeric (see register_int64.go). Only a caller that
+	// asks for them gets them — otherwise the text decoder would turn a
+	// BIN64 into garbage characters.
+	wantInt64 := false
+	for _, marker := range typeMarkers {
+		if marker == int64TypeMarker {
+			wantInt64 = true
+		}
+	}
+	int64Prefix := strings.ToLower(int64TypeMarker) + "_"
+
 	for _, env := range os.Environ() {
 		name, _, ok := strings.Cut(env, "=")
 		if !ok || !strings.HasPrefix(name, prefix) {
@@ -40,6 +51,9 @@ func DiscoverMultiRegisterSpecs(prefix string, typeMarkers []string) []MultiRegi
 		envPrefix := name[:reIdx+3]
 		raw := name[len(prefix):reIdx]
 		outputKey := strings.ToLower(raw)
+		if strings.HasPrefix(outputKey, int64Prefix) != wantInt64 {
+			continue
+		}
 		for _, marker := range typeMarkers {
 			outputKey = strings.TrimPrefix(outputKey, strings.ToLower(marker)+"_")
 		}
