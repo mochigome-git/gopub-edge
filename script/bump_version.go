@@ -32,9 +32,9 @@ func getCurrentVersion(envPath, versionFile string) string {
 		defer f.Close()
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
-			line := scanner.Text()
+			line := strings.TrimRight(scanner.Text(), "\r")
 			if strings.HasPrefix(line, "APP_VERSION=") {
-				return strings.TrimPrefix(line, "APP_VERSION=")
+				return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "APP_VERSION=")), `"'`)
 			}
 		}
 	}
@@ -52,12 +52,16 @@ func getCurrentVersion(envPath, versionFile string) string {
 }
 
 func bumpVersion(ver string) string {
-	parts := strings.Split(ver, ".")
+	parts := strings.Split(strings.TrimSpace(ver), ".")
 	if len(parts) != 3 {
 		fmt.Println("Invalid version format, defaulting to 0.0.1")
 		return "0.0.1"
 	}
-	patch, _ := strconv.Atoi(parts[2])
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		fmt.Printf("❌ Invalid patch number in %q\n", ver)
+		os.Exit(1)
+	}
 	patch++
 	return fmt.Sprintf("%s.%s.%d", parts[0], parts[1], patch)
 }
@@ -66,15 +70,21 @@ func updateEnv(envPath, newVersion string) {
 	file, err := os.Open(envPath)
 	if err != nil {
 		fmt.Println("❌ Could not open .env:", err)
-		return
+		os.Exit(1)
 	}
 	defer file.Close()
+
+	raw, _ := os.ReadFile(envPath)
+	eol := "\n"
+	if strings.Contains(string(raw), "\r\n") {
+		eol = "\r\n" // keep Windows line endings if the file uses them
+	}
 
 	scanner := bufio.NewScanner(file)
 	var lines []string
 	found := false
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimRight(scanner.Text(), "\r")
 		if strings.HasPrefix(line, "APP_VERSION=") {
 			lines = append(lines, "APP_VERSION="+newVersion)
 			found = true
@@ -86,7 +96,10 @@ func updateEnv(envPath, newVersion string) {
 		lines = append(lines, "APP_VERSION="+newVersion)
 	}
 
-	os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0644)
+	if err := os.WriteFile(envPath, []byte(strings.Join(lines, eol)+eol), 0644); err != nil {
+		fmt.Println("❌ Could not write .env:", err)
+		os.Exit(1)
+	}
 }
 
 func updateGoMod(versionFile, newVersion string) {
