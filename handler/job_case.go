@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -172,10 +173,12 @@ func handleJobCase(
 		storeJobFieldToSession(session, "ended_at", formatJobTime(endedAt, endedFromPLC))
 
 		session.Mutex.Lock()
-		if fc, ok := session.ProcessedPayloadsMap["filling_code"]; ok && fc["filling_code"] != nil && fc["filling_code"] != "" {
-			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": fc["filling_code"]}
-		} else if il, ok := session.ProcessedPayloadsMap["ink_lot"]; ok {
-			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": il["ink_lot"]}
+		// job_ref = product_code. An empty HMI input reads back as "0"
+		// from the int64 registers — treat that as empty. When it's
+		// empty, job_ref is left out and gokafka-raw generates one.
+		delete(session.ProcessedPayloadsMap, "job_ref")
+		if ref, ok := jobRefValue(session.ProcessedPayloadsMap["product_code"]["product_code"]); ok {
+			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": ref}
 		}
 
 		// No manually maintained keys list. job_summary.go already
@@ -250,6 +253,19 @@ const plcLocalLayout = "2006-01-02T15:04:05"
 
 // formatJobTime renders a job timestamp for the envelope: PLC wall-clock
 // without an offset, or a UTC instant in RFC3339.
+// jobRefValue returns v as a job_ref, or ok=false when it's missing,
+// blank, or an all-zero register value (an empty HMI input).
+func jobRefValue(v any) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(fmt.Sprint(v))
+	if ref == "" || strings.Trim(ref, "0") == "" {
+		return "", false
+	}
+	return ref, true
+}
+
 func formatJobTime(t time.Time, fromPLC bool) string {
 	if fromPLC {
 		return t.Format(plcLocalLayout)
