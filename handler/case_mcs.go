@@ -6,6 +6,7 @@ import (
 	"gopub-edge/internal/session"
 	"gopub-edge/internal/utils"
 	"gopub-edge/model"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -25,27 +26,24 @@ import (
 func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message,
 	cfg config.AppConfig, rMsgJSONChan <-chan string) {
 
-	for _, channel := range []string{"ch1", "ch2", "ch3"} {
-		// Retrieve NUMBERofSTATE from environment variable and convert to float64
-		NUMBERofSTATEStr := os.Getenv("CASE_6_TRIGGER_NUMBERofSTATE")
-		NUMBERofSTATE, err := strconv.ParseFloat(NUMBERofSTATEStr, 64)
-		if err != nil {
-			fmt.Println("Error parsing NUMBERofSTATE:", err)
-			continue
-		}
-
-		triggerValue, ok := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_" + channel))
-		if ok && triggerValue == NUMBERofSTATE {
-			session.Mutex.Lock()
-			if session.ProcessedPayloadsMap[channel] == nil {
-				session.ProcessedPayloadsMap[channel] = make(map[string]any)
+	// 1. Watch the filling triggers (d150/d450/d750). Reaching
+	//    NUMBERofSTATE marks a fill in progress; FillArmed latches it so we
+	//    can catch the end of that fill below.
+	NUMBERofSTATE, err := strconv.ParseFloat(os.Getenv("CASE_6_TRIGGER_NUMBERofSTATE"), 64)
+	if err != nil {
+		fmt.Println("Error parsing NUMBERofSTATE:", err)
+	} else {
+		for _, channel := range []string{"ch1", "ch2", "ch3"} {
+			triggerValue, ok := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_" + channel))
+			if ok && triggerValue == NUMBERofSTATE {
+				session.Mutex.Lock()
+				if session.ProcessedPayloadsMap[channel] == nil {
+					session.ProcessedPayloadsMap[channel] = make(map[string]any)
+				}
+				session.ProcessedPayloadsMap[channel][channel+"_fill"] = 1
+				session.FillArmed = true
+				session.Mutex.Unlock()
 			}
-			session.ProcessedPayloadsMap[channel][channel+"_fill"] = 1
-			// Arm with FillArmed, NOT IsProcessing: shouldPatch returns false
-			// whenever IsProcessing is true, so arming with it meant the
-			// patch block below could never fire.
-			session.FillArmed = true
-			session.Mutex.Unlock()
 		}
 	}
 
@@ -54,8 +52,8 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 	utils.RemarkMapping(jsonPayloads, session)
 	utils.StoreFlattenedPayloadToSession(jsonPayloads, session)
 
-	// Check if all channels are successful and processing is active
-	// Use a flag to track if all channels have success = 0
+	// 2. When the fill ends (all filling triggers back to 0), store `do`
+	//    once. It then sits in the session until the MCS upload fires.
 	ch1, ok1 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch1"))
 	ch2, ok2 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch2"))
 	ch3, ok3 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch3"))
@@ -66,37 +64,34 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 	session.Mutex.Unlock()
 
 	if session.AllSuccessZero && armed {
-		prevDo := false
-		session.ProcessedPayloadsMap["do"] = utils.ProcessTriggerGeneric(jsonPayloads, messages, func(payload *utils.SafeJsonPayloads) map[string]any {
-			prevDo = true
+		do := utils.ProcessTriggerGeneric(jsonPayloads, messages, func(payload *utils.SafeJsonPayloads) map[string]any {
 			return utils.Hold_changeName_generic(payload, "CASE_6_DO_", nil)
 		})
-
-		processWeightTriggers(session, jsonPayloads, messages)
-
-		if shouldPatch("case9", prevDo, session) {
-
-			// case9PatchKeys is the baseline shape processPatch/downstream
-			// expects for this case — resolvePatchKeys filters it down to
-			// whatever's actually present rather than sending every key
-			// unconditionally.
-			var case9PatchKeys = []string{
-				"ch1", "ch2", "ch3", "do", "weightch1_", "weightch2_", "weightch3_",
-				"ink_lot", "model_name", "lower_limit", "standard", "upper_limit", "target",
-				"ch1_remark", "ch2_remark", "ch3_remark",
-			}
-
-			keys := resolvePatchKeys(session, case9PatchKeys)
-			processPatch(session, keys, cfg, func() {
-				prevDo = false
-				session.Mutex.Lock()
-				session.FillArmed = false
-				session.Mutex.Unlock()
-			}, rMsgJSONChan, nil)
+		session.Mutex.Lock()
+		if len(do) > 0 {
+			session.ProcessedPayloadsMap["do"] = do
+		} else {
+			log.Println("[holdmcs] fill ended but do (CASE_6_DO_*) not in payload; nothing stored")
 		}
-
+		session.FillArmed = false // store once per fill
+		session.Mutex.Unlock()
 	}
 
+	// 3. Same as weightmcs: the MCS upload trigger (CASE_7_TRIGGER_WEIGHING_*)
+	//    alone decides when to fire. Tracked on every message, not gated by
+	//    the filling state.
+	processWeightTriggers(session, jsonPayloads, messages)
+	if shouldPatch("case9", true, session) {
+
+		var case9PatchKeys = []string{
+			"ch1", "ch2", "ch3", "do", "weightch1_", "weightch2_", "weightch3_",
+			"ink_lot", "model_name", "lower_limit", "standard", "upper_limit", "target",
+			"ch1_remark", "ch2_remark", "ch3_remark",
+		}
+
+		keys := resolvePatchKeys(session, case9PatchKeys)
+		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil)
+	}
 }
 
 // CASE10, WeightMCS; hold the data and wait until the weighing scale
