@@ -47,39 +47,54 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 		}
 	}
 
+	// 2. Track the latest `do` (CASE_6_DO_*, e.g. do=d2870). Read the raw
+	//    register here, BEFORE utils.ChangeName renames it away, and keep 0
+	//    as a valid value. While DoFrozen (fill ended, waiting for upload)
+	//    live values are ignored so the held one is what gets sent.
+	liveDo := readHoldMCSDo(jsonPayloads)
+
 	utils.ChangeName(jsonPayloads)
 	utils.ConvertAndStoreMultiStringRegisterFields(jsonPayloads)
 	utils.RemarkMapping(jsonPayloads, session)
 	utils.StoreFlattenedPayloadToSession(jsonPayloads, session)
 
-	// 2. When the fill ends (all filling triggers back to 0), store `do`
-	//    once. It then sits in the session until the MCS upload fires.
 	ch1, ok1 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch1"))
 	ch2, ok2 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch2"))
 	ch3, ok3 := jsonPayloads.GetFloat64(os.Getenv("CASE_6_TRIGGER_ch3"))
 	session.AllSuccessZero = ok1 && ok2 && ok3 && ch1 == 0 && ch2 == 0 && ch3 == 0
 
 	session.Mutex.Lock()
-	armed := session.FillArmed
-	session.Mutex.Unlock()
-
-	if session.AllSuccessZero && armed {
-		do := utils.ProcessTriggerGeneric(jsonPayloads, messages, func(payload *utils.SafeJsonPayloads) map[string]any {
-			return utils.Hold_changeName_generic(payload, "CASE_6_DO_", nil)
-		})
-		session.Mutex.Lock()
-		if len(do) > 0 {
-			session.ProcessedPayloadsMap["do"] = do
-		} else {
-			log.Println("[holdmcs] fill ended but do (CASE_6_DO_*) not in payload; nothing stored")
-		}
-		session.FillArmed = false // store once per fill
-		session.Mutex.Unlock()
+	if len(liveDo) > 0 && !session.DoFrozen {
+		session.HeldDo = liveDo
 	}
 
+	// Fill ended: freeze the last `do` until the upload fires.
+	if session.AllSuccessZero && session.FillArmed {
+		session.FillArmed = false
+		session.DoFrozen = true
+		if len(session.HeldDo) > 0 {
+			log.Printf("[holdmcs] fill ended; holding do=%v until upload\n", session.HeldDo)
+		} else {
+			log.Println("[holdmcs] fill ended but no do (CASE_6_DO_*) seen yet; upload will go without it")
+		}
+	}
+
+	// holdmcs owns the "do" bucket: StoreFlattenedPayloadToSession above
+	// writes the live renamed value there on every message, so put the
+	// held value back (or remove the live one if nothing is held).
+	if len(session.HeldDo) > 0 {
+		held := make(map[string]any, len(session.HeldDo))
+		for k, v := range session.HeldDo {
+			held[k] = v
+		}
+		session.ProcessedPayloadsMap["do"] = held
+	} else {
+		delete(session.ProcessedPayloadsMap, "do")
+	}
+	session.Mutex.Unlock()
+
 	// 3. Same as weightmcs: the MCS upload trigger (CASE_7_TRIGGER_WEIGHING_*)
-	//    alone decides when to fire. Tracked on every message, not gated by
-	//    the filling state.
+	//    alone decides when to fire.
 	processWeightTriggers(session, jsonPayloads, messages)
 	if shouldPatch("case9", true, session) {
 
@@ -90,8 +105,26 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 		}
 
 		keys := resolvePatchKeys(session, case9PatchKeys)
-		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil)
+		processPatch(session, keys, cfg, func() {
+			session.Mutex.Lock()
+			session.IsProcessing = false
+			session.DoFrozen = false // resume tracking the latest do for the next fill
+			session.Mutex.Unlock()
+		}, rMsgJSONChan, nil)
 	}
+}
+
+// readHoldMCSDo returns {newKey: value} for every CASE_6_DO_<newKey>=<reg>
+// whose raw register is in this payload. Unlike Hold_changeName_generic it
+// keeps 0, since a 0 do reading is real data.
+func readHoldMCSDo(jsonPayloads *utils.SafeJsonPayloads) map[string]any {
+	out := map[string]any{}
+	for newKey, reg := range utils.GetKeyTransformationsFromEnv("CASE_6_DO_") {
+		if v, ok := jsonPayloads.Get(strings.ToLower(reg)); ok && v != nil {
+			out[newKey] = v
+		}
+	}
+	return out
 }
 
 // CASE10, WeightMCS; hold the data and wait until the weighing scale
