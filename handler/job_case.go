@@ -173,12 +173,15 @@ func handleJobCase(
 		storeJobFieldToSession(session, "ended_at", formatJobTime(endedAt, endedFromPLC))
 
 		session.Mutex.Lock()
-		// job_ref = product_code. An empty HMI input reads back as "0"
-		// from the int64 registers — treat that as empty. When it's
+		// job_ref = <product_code>-<YYYYMMDD>-<HHMMSS> of the job's end,
+		// e.g. 123456-20261103-171205. An empty HMI input reads back as
+		// "0" from the int64 registers — treat that as empty. When it's
 		// empty, job_ref is left out and gokafka-raw generates one.
 		delete(session.ProcessedPayloadsMap, "job_ref")
-		if ref, ok := jobRefValue(session.ProcessedPayloadsMap["product_code"]["product_code"]); ok {
-			session.ProcessedPayloadsMap["job_ref"] = map[string]any{"job_ref": ref}
+		if code, ok := jobRefValue(session.ProcessedPayloadsMap["product_code"]["product_code"]); ok {
+			session.ProcessedPayloadsMap["job_ref"] = map[string]any{
+				"job_ref": code + "-" + jobRefTime(endedAt, endedFromPLC),
+			}
 		}
 
 		// No manually maintained keys list. job_summary.go already
@@ -264,6 +267,16 @@ func jobRefValue(v any) (string, bool) {
 		return "", false
 	}
 	return ref, true
+}
+
+// jobRefTime renders the job end as YYYYMMDD-HHMMSS in factory local
+// time. PLC values are already local wall-clock; the time.Now() fallback
+// is UTC, so it is shown in the edge unit's local zone.
+func jobRefTime(t time.Time, fromPLC bool) string {
+	if !fromPLC {
+		t = t.Local()
+	}
+	return t.Format("20060102-150405")
 }
 
 func formatJobTime(t time.Time, fromPLC bool) string {
