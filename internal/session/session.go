@@ -11,10 +11,12 @@ var (
 )
 
 type Session struct {
-	Mutex                sync.Mutex // Sync to protect session.ProcessedPayloadsMap
-	PrevSealing          float64    // To store the trigger of condition judgement in case 4
-	IsProcessing         bool       // Flag to track if the process is active
-	FillArmed            bool       // CASE 9 holdmcs fill-cycle latch; separate from IsProcessing, which shouldPatch reads as "patch in flight"
+	Mutex                sync.Mutex     // Sync to protect session.ProcessedPayloadsMap
+	PrevSealing          float64        // To store the trigger of condition judgement in case 4
+	IsProcessing         bool           // Flag to track if the process is active
+	FillArmed            bool           // CASE 9 holdmcs fill-cycle latch; separate from IsProcessing, which shouldPatch reads as "patch in flight"
+	HeldDo               map[string]any // CASE 9 holdmcs: last d2870 seen ("do"), sent on upload
+	DoFrozen             bool           // CASE 9 holdmcs: true from fill end until upload fires; HeldDo stops updating
 	AllSuccessZero       bool
 	WeightTriggerCh1     bool
 	WeightTriggerCh2     bool
