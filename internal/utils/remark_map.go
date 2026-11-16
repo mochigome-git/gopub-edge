@@ -10,9 +10,15 @@ import (
 )
 
 // Remarks are sent as raw PLC codes (d26/d27/d28 → ch1/ch2/ch3_remark).
-// Code 0 = good; anything else is a reject reason. The code → label
-// translation (per tenant, en/ja) lives in the DB reason-code table,
+// Code 0 = good; anything else is a reject code. The code → label
+// translation (per tenant, en/ja) lives in the DB reject-code table,
 // not on the edge.
+//
+// Each reject can also carry a reason (d57/d58/d59 → ch1/ch2/ch3_reason),
+// a second raw code the operator / PLC picks (1, 2, 3, …) that explains
+// the reject. Its labels live in the DB reject-reason table. A reason is
+// only sent alongside a non-zero remark and is latched with it: it stays
+// as long as the remark stays, and goes away when the remark clears.
 
 //"gim":
 //	0:  "NORMAL",
@@ -106,9 +112,15 @@ func RemarkMapping(jsonPayloads *SafeJsonPayloads, session *session.Session) {
 	}
 
 	remarks := map[string]int{}
-	for reg, key := range map[string]string{"d26": "ch1_remark", "d27": "ch2_remark", "d28": "ch3_remark"} {
+	for reg, key := range remarkRegisters {
 		if code, ok := lookup(reg); ok {
 			remarks[key] = code
+		}
+	}
+	reasons := map[string]int{}
+	for reg, key := range reasonRegisters {
+		if code, ok := lookup(reg); ok {
+			reasons[key] = code
 		}
 	}
 
@@ -125,16 +137,42 @@ func RemarkMapping(jsonPayloads *SafeJsonPayloads, session *session.Session) {
 		if prev > 0 && val == 0 {
 			session.RemarkNormalStreak[key]++
 			if session.RemarkNormalStreak[key] < NormalConfirmCycles {
-				continue
+				continue // remark (and its reason) stay latched
 			}
 		} else {
 			session.RemarkNormalStreak[key] = 0
 		}
 		session.ProcessedPayloadsMap[key] = map[string]any{key: val}
+		latchReason(session, remarkToReason[key], val, reasons)
 	}
 	session.Mutex.Unlock()
 
-	jsonPayloads.Delete("d26")
-	jsonPayloads.Delete("d27")
-	jsonPayloads.Delete("d28")
+	for reg := range remarkRegisters {
+		jsonPayloads.Delete(reg)
+	}
+	for reg := range reasonRegisters {
+		jsonPayloads.Delete(reg)
+	}
+}
+
+var remarkRegisters = map[string]string{"d26": "ch1_remark", "d27": "ch2_remark", "d28": "ch3_remark"}
+
+var reasonRegisters = map[string]string{"d57": "ch1_reason", "d58": "ch2_reason", "d59": "ch3_reason"}
+
+var remarkToReason = map[string]string{"ch1_remark": "ch1_reason", "ch2_remark": "ch2_reason", "ch3_remark": "ch3_reason"}
+
+// latchReason keeps a channel's reason in step with its (just stored)
+// remark. Caller holds session.Mutex.
+//   - remark 0 (good, confirmed): no reason — drop any held one.
+//   - remark non-zero: take the live reason when it's non-zero; if the PLC
+//     shows 0 / nothing this cycle (reason not picked yet, or already
+//     reset), keep the one already held so the reject keeps its reason.
+func latchReason(session *session.Session, reasonKey string, remark int, reasons map[string]int) {
+	if remark == 0 {
+		delete(session.ProcessedPayloadsMap, reasonKey)
+		return
+	}
+	if r, ok := reasons[reasonKey]; ok && r != 0 {
+		session.ProcessedPayloadsMap[reasonKey] = map[string]any{reasonKey: r}
+	}
 }

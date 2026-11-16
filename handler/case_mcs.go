@@ -102,6 +102,7 @@ func handleHoldMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonPay
 			"ch1", "ch2", "ch3", "do", "weightch1_", "weightch2_", "weightch3_",
 			"ink_lot", "model_name", "lower_limit", "standard", "upper_limit", "target",
 			"ch1_remark", "ch2_remark", "ch3_remark",
+			"ch1_reason", "ch2_reason", "ch3_reason",
 		}
 
 		keys := resolvePatchKeys(session, case9PatchKeys)
@@ -168,6 +169,7 @@ func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonP
 			"ch1_", "ch2_", "ch3_", "vacuum", "weightch1_", "weightch2_", "weightch3_",
 			"counterch_", "ink_lot", "model_name", "lower_limit", "standard", "upper_limit", "target",
 			"ch1_remark", "ch2_remark", "ch3_remark",
+			"ch1_reason", "ch2_reason", "ch3_reason",
 		}
 
 		keys := resolvePatchKeys(session, case10PatchKeys)
