@@ -20,6 +20,13 @@ const (
 )
 
 func processPatch(session *session.Session, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, kind ...envelopeKind) {
+	processPatchFrom(session, session.ProcessedPayloadsMap, keys, cfg, after, rMsgJSONChan, plcApp, kind...)
+}
+
+// processPatchFrom is processPatch reading from src instead of
+// session.ProcessedPayloadsMap. The job case passes a frozen snapshot so
+// nothing a later frame does to the session can change what gets posted.
+func processPatchFrom(session *session.Session, src map[string]map[string]any, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, kind ...envelopeKind) {
 	session.Mutex.Lock()
 	session.IsProcessing = true
 	session.Mutex.Unlock()
@@ -28,7 +35,7 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 
 	parts := []map[string]any{}
 	for _, key := range keys {
-		parts = append(parts, session.ProcessedPayloadsMap[key])
+		parts = append(parts, src[key])
 	}
 	data := mergeNonEmptyMaps(parts...)
 
@@ -105,7 +112,7 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 
 	session.Mutex.Lock()
 	for _, key := range keys {
-		delete(session.ProcessedPayloadsMap, key)
+		delete(src, key)
 	}
 	for key := range session.RemarkNormalStreak {
 		delete(session.RemarkNormalStreak, key)

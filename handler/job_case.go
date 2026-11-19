@@ -4,6 +4,8 @@ package handler
 import (
 	"fmt"
 	"log"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,12 +61,22 @@ func handleJobCase(
 
 	session.Mutex.Lock()
 	wasOn := session.JobInProgress
+	if buttonOn && session.JobEnding {
+		// Trigger came back before the end was confirmed — a glitch,
+		// not a real end. Unfreeze and keep collecting into the same job.
+		log.Printf("handleJobCase: trigger back ON after %d OFF frame(s) / %v — not a job end, continuing the same job",
+			session.JobOffFrames, jobNow().Sub(session.JobOffSince).Round(time.Millisecond))
+		session.JobEnding = false
+		session.JobOffFrames = 0
+	}
 	session.Mutex.Unlock()
 
 	if buttonOn && !wasOn {
 		session.Mutex.Lock()
 		session.JobInProgress = true
-		session.JobStartedAt = time.Now().UTC()
+		session.JobEnding = false
+		session.JobOffFrames = 0
+		session.JobStartedAt = jobNow().UTC()
 		session.JobEndedAt = time.Time{}
 		session.JobStartedFromPLC = false
 		session.JobEndedFromPLC = false
@@ -151,55 +163,143 @@ func handleJobCase(
 
 	if !buttonOn && wasOn {
 		session.Mutex.Lock()
-		startedAt := session.JobStartedAt
-		endedAt := session.JobEndedAt // last value captured during ON, may be zero
-		startedFromPLC := session.JobStartedFromPLC
-		endedFromPLC := session.JobEndedFromPLC
-		session.JobInProgress = false
+		if !session.JobEnding {
+			// First OFF frame: freeze the held job data from here on.
+			// The PLC may reset operator/temps/counters right after the
+			// trigger drops, so no field is read from OFF frames.
+			session.JobEnding = true
+			session.JobOffSince = jobNow()
+			session.JobOffFrames = 0
+		}
+		session.JobOffFrames++
+		frames, offFor := session.JobOffFrames, jobNow().Sub(session.JobOffSince)
 		session.Mutex.Unlock()
 
-		// One more attempt right at the OFF edge, in case the PLC's
-		// final write lands on this exact message.
+		// The end timestamp is the one thing still read while frozen:
+		// the PLC writes it at completion, it isn't part of what gets
+		// reset, and it may land a frame or two after the trigger drops.
 		if t, ok := readDateTime(jsonPayloads, utils.GetKeyTransformationsFromEnv(jobFieldPrefix), "END_DATE_TIME_"); ok {
-			endedAt = t
-			endedFromPLC = true
-		}
-		if endedAt.IsZero() {
-			log.Printf("handleJobCase: END_DATE_TIME_* never captured during job — falling back to time.Now() for ended_at")
-			endedAt = time.Now().UTC()
-			endedFromPLC = false
-		}
-		storeJobFieldToSession(session, "started_at", formatJobTime(startedAt, startedFromPLC))
-		storeJobFieldToSession(session, "ended_at", formatJobTime(endedAt, endedFromPLC))
-
-		session.Mutex.Lock()
-		// job_ref = <product_code>-<YYYYMMDD>-<HHMMSS> of the job's end,
-		// e.g. 123456-20261103-171205. An empty HMI input reads back as
-		// "0" from the int64 registers — treat that as empty. When it's
-		// empty, job_ref is left out and gokafka-raw generates one.
-		delete(session.ProcessedPayloadsMap, "job_ref")
-		if code, ok := jobRefValue(session.ProcessedPayloadsMap["product_code"]["product_code"]); ok {
-			session.ProcessedPayloadsMap["job_ref"] = map[string]any{
-				"job_ref": code + "-" + jobRefTime(endedAt, endedFromPLC),
-			}
+			session.Mutex.Lock()
+			session.JobEndedAt = t
+			session.JobEndedFromPLC = true
+			session.Mutex.Unlock()
 		}
 
-		// No manually maintained keys list. job_summary.go already
-		// knows which of these have dedicated columns (total_output,
-		// model_name, ...) and deletes them before marshalling the
-		// rest into meta — so whatever we didn't explicitly handle
-		// above just rides along and lands in meta automatically.
-		keys := make([]string, 0, len(session.ProcessedPayloadsMap))
-		for k := range session.ProcessedPayloadsMap {
-			keys = append(keys, k)
+		minFrames, minOff := jobEndDebounce()
+		if frames < minFrames || offFor < minOff {
+			return // not confirmed yet — wait for more OFF frames
 		}
-		session.Mutex.Unlock()
+		finishJob(session, cfg, rMsgJSONChan)
+	}
+}
 
-		processPatch(session, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, envelopeJob)
+// finishJob posts a confirmed job end from a frozen snapshot of the held
+// data. The snapshot is taken out of the session first, so the session
+// starts clean for the next job and nothing that happens to it while
+// the request is being built and published can change what is sent.
+func finishJob(session *session.Session, cfg config.AppConfig, rMsgJSONChan <-chan string) {
+	session.Mutex.Lock()
+	startedAt := session.JobStartedAt
+	startedFromPLC := session.JobStartedFromPLC
+	endedAt := session.JobEndedAt // last PLC end time captured, may be zero
+	endedFromPLC := session.JobEndedFromPLC
+	offSince := session.JobOffSince
 
-		session.Mutex.Lock()
-		session.ProcessedPayloadsMap = make(map[string]map[string]any)
-		session.Mutex.Unlock()
+	frozen := session.ProcessedPayloadsMap
+	session.ProcessedPayloadsMap = make(map[string]map[string]any)
+	session.JobInProgress = false
+	session.JobEnding = false
+	session.JobOffFrames = 0
+	session.Mutex.Unlock()
+
+	if endedAt.IsZero() {
+		// No PLC end time: use when the trigger first dropped, not when
+		// the debounce confirmed it.
+		log.Printf("handleJobCase: END_DATE_TIME_* never captured during job — using the time the trigger dropped for ended_at")
+		endedAt = offSince.UTC()
+		endedFromPLC = false
+	}
+	frozen["started_at"] = map[string]any{"started_at": formatJobTime(startedAt, startedFromPLC)}
+	frozen["ended_at"] = map[string]any{"ended_at": formatJobTime(endedAt, endedFromPLC)}
+
+	// job_ref = <product_code>-<YYYYMMDD>-<HHMMSS> of the job's end,
+	// e.g. 123456-20261103-171205. An empty HMI input reads back as
+	// "0" from the int64 registers — treat that as empty. When it's
+	// empty, job_ref is left out and gokafka-raw generates one.
+	delete(frozen, "job_ref")
+	if code, ok := jobRefValue(frozen["product_code"]["product_code"]); ok {
+		frozen["job_ref"] = map[string]any{
+			"job_ref": code + "-" + jobRefTime(endedAt, endedFromPLC),
+		}
+	}
+
+	warnMissingSetupFields(frozen)
+
+	// No manually maintained keys list. job_summary.go already knows
+	// which of these have dedicated columns (total_output, model_name,
+	// ...) and deletes them before marshalling the rest into meta — so
+	// whatever we didn't explicitly handle above just rides along and
+	// lands in meta automatically.
+	keys := make([]string, 0, len(frozen))
+	for k := range frozen {
+		keys = append(keys, k)
+	}
+
+	postJob(session, frozen, keys, cfg, rMsgJSONChan)
+}
+
+// postJob publishes the frozen job snapshot; swappable in tests.
+var postJob = func(session *session.Session, frozen map[string]map[string]any, keys []string, cfg config.AppConfig, rMsgJSONChan <-chan string) {
+	processPatchFrom(session, frozen, keys, cfg, func() { session.IsProcessing = false }, rMsgJSONChan, nil, envelopeJob)
+}
+
+// jobNow is time.Now, swappable in tests.
+var jobNow = time.Now
+
+// jobEndDebounce returns how long the trigger must stay OFF before a job
+// end is confirmed: at least JOB_END_DEBOUNCE_FRAMES consecutive OFF
+// frames (default 3) AND at least JOB_END_DEBOUNCE_SEC seconds (default
+// 3, fractions allowed). Both must hold. Set both to 1 / 0 to end on the
+// first OFF frame like before.
+func jobEndDebounce() (int, time.Duration) {
+	frames := 3
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("JOB_END_DEBOUNCE_FRAMES"))); err == nil && v >= 1 {
+		frames = v
+	}
+	dur := 3 * time.Second
+	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("JOB_END_DEBOUNCE_SEC")), 64); err == nil && v >= 0 {
+		dur = time.Duration(v * float64(time.Second))
+	}
+	return frames, dur
+}
+
+// setupFieldChecks are the operator-entered fields a job should never end
+// without, keyed by output name -> the env var that configures them. A
+// field is only checked when its env var is set, so machines that don't
+// map it don't get warnings.
+var setupFieldChecks = map[string]string{
+	"operator":  jobFieldPrefix + "STR_OPERATOR_RE0",
+	"ink_temp":  jobFieldPrefix + "ink_temp",
+	"room_temp": jobFieldPrefix + "room_temp",
+}
+
+// warnMissingSetupFields logs, once per job, any configured setup field
+// that is still empty/zero at the end — so a PLC/HMI that cleared or
+// never had the input shows up in the edge log the same day instead of
+// in review later.
+func warnMissingSetupFields(frozen map[string]map[string]any) {
+	var missing []string
+	for key, envName := range setupFieldChecks {
+		if os.Getenv(envName) == "" {
+			continue
+		}
+		if isZeroJobValue(frozen[key][key]) {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		log.Printf("handleJobCase: ⚠ job ended with empty setup field(s) %v — the PLC registers held no value during this job", missing)
 	}
 }
 

@@ -40,6 +40,13 @@ type Session struct {
 	// applies the tenant's timezone to PLC values — see formatJobTime.
 	JobStartedFromPLC bool
 	JobEndedFromPLC   bool
+	// End debounce: the trigger reading OFF once only starts the end of a
+	// job. While JobEnding is true the held job data is frozen (no frame
+	// updates it), and the job is posted only after the trigger has stayed
+	// OFF long enough; if it comes back ON the same job continues.
+	JobEnding    bool
+	JobOffSince  time.Time // when the trigger first read OFF
+	JobOffFrames int       // consecutive OFF frames seen since JobOffSince
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection
