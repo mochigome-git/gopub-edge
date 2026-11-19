@@ -85,7 +85,7 @@ func handleJobCase(
 			if isDateTimeComponentField(k) {
 				continue // combined into started_at/ended_at below, not stored raw
 			}
-			storeJobFieldToSession(session, k, v)
+			storeStickyJobField(session, k, v)
 		}
 
 		// If the PLC gives us a real start timestamp, prefer it over
@@ -140,11 +140,11 @@ func handleJobCase(
 		// product_code, filling_code — CASE_JOB_I64_<KEY>_RE0..RE3.
 		int64Fields, _ := utils.ReadDiscoveredInt64Fields(jsonPayloads, jobFieldPrefix)
 		for k, v := range int64Fields {
-			storeJobFieldToSession(session, k, v)
+			storeStickyJobField(session, k, v)
 		}
 
 		if len(dailyCheck) > 0 {
-			storeJobFieldToSession(session, "daily_check", dailyCheck)
+			mergeStickyDailyCheck(session, dailyCheck)
 		}
 		return
 	}
@@ -380,4 +380,65 @@ func storeJobFieldToSession(sess *session.Session, key string, val any) {
 	sess.Mutex.Lock()
 	defer sess.Mutex.Unlock()
 	sess.ProcessedPayloadsMap[key] = map[string]any{key: val}
+}
+
+// storeStickyJobField stores a job field read during the ON phase, but
+// never lets a zero/blank reading replace a real value already captured
+// for this job. Every ON frame used to overwrite the field, so whatever
+// the PLC showed in the LAST frame before the trigger dropped won — and
+// if the ladder/HMI clears ink_temp, room_temp, the daily-check grid or
+// the reject counters at completion (or a single frame reads back
+// zeros), a value that was correct for hours was thrown away and 0 was
+// logged instead. Non-zero readings still overwrite, so a corrected
+// value or a rising counter keeps updating.
+func storeStickyJobField(sess *session.Session, key string, val any) {
+	sess.Mutex.Lock()
+	defer sess.Mutex.Unlock()
+	if isZeroJobValue(val) {
+		if prev, ok := sess.ProcessedPayloadsMap[key][key]; ok && !isZeroJobValue(prev) {
+			return
+		}
+	}
+	sess.ProcessedPayloadsMap[key] = map[string]any{key: val}
+}
+
+// mergeStickyDailyCheck merges this frame's daily_check cells into the
+// job's daily_check object cell by cell, with the same rule as
+// storeStickyJobField. Before, the whole object was replaced each frame.
+func mergeStickyDailyCheck(sess *session.Session, frame map[string]any) {
+	sess.Mutex.Lock()
+	defer sess.Mutex.Unlock()
+	merged := map[string]any{}
+	if prev, ok := sess.ProcessedPayloadsMap["daily_check"]["daily_check"].(map[string]any); ok {
+		for k, v := range prev {
+			merged[k] = v
+		}
+	}
+	for k, v := range frame {
+		if prev, ok := merged[k]; ok && isZeroJobValue(v) && !isZeroJobValue(prev) {
+			continue
+		}
+		merged[k] = v
+	}
+	sess.ProcessedPayloadsMap["daily_check"] = map[string]any{"daily_check": merged}
+}
+
+// isZeroJobValue reports whether a register reading carries no data:
+// nil, numeric zero, or a blank/"0" string.
+func isZeroJobValue(v any) bool {
+	switch n := v.(type) {
+	case nil:
+		return true
+	case float64:
+		return n == 0
+	case int:
+		return n == 0
+	case int64:
+		return n == 0
+	case string:
+		t := strings.TrimSpace(n)
+		return t == "" || t == "0"
+	default:
+		return false
+	}
 }
