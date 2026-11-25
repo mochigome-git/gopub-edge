@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"sort"
@@ -83,22 +84,33 @@ func handleMCSStateCase(
 ) {
 	tr := utils.GetKeyTransformationsFromEnv(mcsStateFieldPrefix)
 
+	rules := loadMCSRunRules(tr)
 	runStartKey, hasRunStart := tr["RUN_START"]
-	if !hasRunStart {
-		log.Printf("handleMCSStateCase: no RUN_START register configured (CASE_MCS_STATE_RUN_START) — skipping")
+	if !hasRunStart && !rules.hasRules() {
+		log.Printf("handleMCSStateCase: no RUN_START register or RUN_REQUIRE_/RUN_COUNT rule configured (CASE_MCS_STATE_*) — skipping")
 		return
 	}
 	runStopKey, hasRunStop := tr["RUN_STOP"]
 	downStartKey, hasDownStart := tr["DOWNTIME_START"]
 	downStopKey, hasDownStop := tr["DOWNTIME_STOP"]
 
-	runEdge := hasRunStop && runStopKey != runStartKey
+	runEdge := hasRunStart && hasRunStop && runStopKey != runStartKey
 
 	// 1. Update the inputs from this poll.
 	if runEdge {
 		updateRunEdge(sess, jsonPayloads, runStartKey, runStopKey)
-	} else {
+	} else if hasRunStart {
 		updateRunLevel(sess, jsonPayloads, runStartKey)
+	}
+	if rules.hasRules() {
+		allSeen := updateRunRuleValues(sess, rules, jsonPayloads)
+		// Without a run bit, the state is known once every rule register
+		// has been received.
+		if !hasRunStart && allSeen {
+			sess.Mutex.Lock()
+			sess.StateKnown = true
+			sess.Mutex.Unlock()
+		}
 	}
 	if hasDownStart {
 		if hasDownStop && downStopKey != downStartKey {
@@ -118,9 +130,26 @@ func handleMCSStateCase(
 		return
 	}
 
-	// 3. One target state, one transition.
-	target := resolveTarget(sess, runEdge)
-	keys := applyTransition(sess, target, time.Now().UTC())
+	// 3. Run decision: run bit (if any) AND rules, then debounce.
+	now := time.Now().UTC()
+	sess.Mutex.Lock()
+	rawRun := !hasRunStart || sess.RunRequested
+	sess.Mutex.Unlock()
+	if rules.hasRules() {
+		ok, summary := evalRunRules(sess, rules)
+		if hasRunStart {
+			sess.Mutex.Lock()
+			summary = fmt.Sprintf("%s %s, %s", runStartKey, okText(sess.RunRequested), summary)
+			sess.Mutex.Unlock()
+		}
+		rawRun = rawRun && ok
+		logRunChange(sess, rawRun, summary)
+	}
+	running := debounceRun(sess, rawRun, rules, now)
+
+	// 4. One target state, one transition.
+	target := resolveTarget(sess, runEdge, running)
+	keys := applyTransition(sess, target, now)
 	if len(keys) == 0 {
 		return
 	}
@@ -251,7 +280,7 @@ func updateAlarms(sess *session.Session, jsonPayloads *utils.SafeJsonPayloads, t
 // ── State machine ─────────────────────────────────────────────────────────
 
 // resolveTarget: fault > downtime button > run > idle.
-func resolveTarget(sess *session.Session, runEdge bool) mcsTarget {
+func resolveTarget(sess *session.Session, runEdge, running bool) mcsTarget {
 	sess.Mutex.Lock()
 	defer sess.Mutex.Unlock()
 
@@ -275,7 +304,7 @@ func resolveTarget(sess *session.Session, runEdge bool) mcsTarget {
 		return mcsTarget{state: mcsStateDowntime, reason: mcsReasonFault, alarms: active}
 	case sess.DowntimeRequested:
 		return mcsTarget{state: mcsStateDowntime, reason: mcsReasonButton}
-	case sess.RunRequested:
+	case running:
 		return mcsTarget{state: mcsStateRunning}
 	default:
 		return mcsTarget{state: mcsStateIdle}

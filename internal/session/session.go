@@ -66,6 +66,15 @@ type Session struct {
 	RunStopWasOn       bool
 	DowntimeStartWasOn bool
 	DowntimeStopWasOn  bool
+
+	// CASE_MCS_STATE_RUN_* rules (mcs_run_conditions.go)
+	RunRuleLast  map[string]float64 // last value per rule register
+	RunInit      bool               // debounce seeded
+	RunActive    bool               // debounced run decision
+	RunRawLast   bool               // raw run condition last poll
+	RunRawSince  time.Time          // when the raw condition last flipped
+	RunLogged    bool
+	RunLoggedVal bool
 }
 
 func NewSession() *Session {

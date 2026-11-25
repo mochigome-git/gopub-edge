@@ -93,6 +93,33 @@ CASE_LOT_REQUIRE_d392=>200      # speed went above 200
 - Conditions met before a gopub-edge restart are not remembered.
 - No `CASE_LOT_REQUIRE_*` → every press creates a lot, as before.
 
+### Machine state case — when "running" counts
+
+`TRIGGER_DEVICE=m34,mcsState` tracks running / idle / downtime
+(priority: fault alarm > downtime button > running > idle) and publishes one
+message per transition. By default the run bit alone decides. Optional rules
+make "running" stricter — all must hold, and are ANDed with the run bit:
+
+```env
+CASE_MCS_STATE_RUN_START=m34                 # optional once a rule below is set
+CASE_MCS_STATE_RUN_REQUIRE_d392=>200         # speed above 200 (same syntax as CASE_LOT_REQUIRE_*)
+CASE_MCS_STATE_RUN_COUNT=m28,m29,m30,m31,m32,m33
+CASE_MCS_STATE_RUN_COUNT_MIN=4               # at least 4 of them ON (default: all)
+CASE_MCS_STATE_RUN_ON_DELAY_SEC=10           # must hold 10 s before -> running
+CASE_MCS_STATE_RUN_OFF_DELAY_SEC=30          # must fail 30 s before -> idle
+
+CASE_MCS_STATE_DOWNTIME_START=m36            # HMI downtime bit (level), or START/STOP buttons
+```
+
+- Register names are case-insensitive. A register missing from a poll keeps
+  its last value.
+- The delays stop a short speed dip from logging a stop/start pair. The first
+  poll after a restart is taken as-is, so a restart while running doesn't log
+  a false idle period.
+- When the rule result flips it is logged, e.g.
+  `run condition not met — m34 ok, d392 > 200 ok (300), count 3/4 NOT met`.
+- No `RUN_REQUIRE_*` / `RUN_COUNT` → behaves exactly as before.
+
 ### 4. Run
 
 ```
