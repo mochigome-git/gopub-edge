@@ -50,6 +50,10 @@ type Session struct {
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection
+	// CASE_LOT_REQUIRE_* (lot_conditions.go): condition text -> true once it
+	// has held since the last lot was created; last value per register.
+	LotCondMet  map[string]bool
+	LotCondLast map[string]float64
 
 	// ── state case ──────────────────────────────────────
 	MachineState       string    // "running" | "idle" | "downtime"

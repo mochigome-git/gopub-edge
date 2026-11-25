@@ -65,6 +65,34 @@ LOOPING=0.5
 
 ```
 
+### Lot case — conditions before a new lot
+
+`TRIGGER_DEVICE=x26,lot` creates a new `production.lot` (via the lot
+envelope, needs `MACHINE_ID`) on the OFF→ON edge of `x26`. Optional
+conditions gate that edge — **any number**, one env var each:
+
+```env
+CASE_LOT_REQUIRE_d418=>1500     # meter went above 1500
+CASE_LOT_REQUIRE_d392=>200      # speed went above 200
+# CASE_LOT_REQUIRE_m50==1       # add more as needed
+# CASE_LOT_CONDITION_MODE=latched   # or: now
+```
+
+- `<condition>`: optional `>`, `>=`, `<`, `<=`, `=`, `!=` then a number; a bare
+  number means `>`. Register names are case-insensitive (`D418` = `d418`).
+- `latched` (default): each condition only has to be true at **some** poll
+  since the last lot. A meter-reset button is pressed after the machine has
+  stopped — the speed is already 0 and the meter may be cleared in that same
+  poll — so checking only at the press would never pass.
+- `now`: every condition must be true in the poll where the trigger turns ON.
+- A press with an unmet condition is ignored and logged
+  (`x26 ON ignored — lot continues; unmet (latched): d418 > 1500 (last 820)`);
+  the current lot continues and the conditions met so far are kept.
+- Every register used must arrive on the service's `MQTT_TOPIC`, together
+  with the trigger.
+- Conditions met before a gopub-edge restart are not remembered.
+- No `CASE_LOT_REQUIRE_*` → every press creates a lot, as before.
+
 ### 4. Run
 
 ```
