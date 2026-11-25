@@ -151,7 +151,9 @@ func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan cha
 	// All config comes from cfg (populated by config.Load from .env / ECS).
 	// Relevant env vars:
 	//   CYCLE_MODE_ENABLED=true
-	//   CYCLE_ANCHOR_TOPIC=plc/d100   ← first topic PLC publishes each scan
+	//   CYCLE_ANCHOR_TOPIC=x26        ← a device published once per scan:
+	//                                   full topic, or just the device name
+	//   (the legacy flusher takes over whenever the anchor isn't seen)
 	//   CYCLE_TIMEOUT_SEC=5           ← safety flush if anchor goes silent
 	// -----------------------------------------------------------------
 	stopCycle := make(chan struct{})
@@ -233,7 +235,12 @@ func messageReceived(msg mqtt.Message) {
 	}
 
 	// --- Legacy burst flusher path ---
-	// Kept for parallel operation during migration.
+	// Only while cycle mode is off or not (yet) detecting cycles. Running
+	// both splits each PLC scan into partial batches (the flusher cuts on
+	// a 2 s timer and on 150 ms gaps), so rows end up with missing fields.
+	if globalCycleBuffer != nil && globalCycleBuffer.Active() {
+		return
+	}
 	receivedMessagesMutex.Lock()
 	now := time.Now()
 	if lastMessageTime.IsZero() || now.Sub(lastMessageTime) < BurstDetectionGap {

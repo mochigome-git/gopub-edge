@@ -93,6 +93,27 @@ CASE_LOT_REQUIRE_d392=>200      # speed went above 200
 - Conditions met before a gopub-edge restart are not remembered.
 - No `CASE_LOT_REQUIRE_*` → every press creates a lot, as before.
 
+### Cycle mode — one full PLC scan per row
+
+The legacy burst flusher cuts the MQTT stream on a 2 s timer and on 150 ms
+gaps, so one PLC scan can be split over several rows and charts show missing
+fields. Cycle mode groups messages by scan instead:
+
+```env
+CYCLE_MODE_ENABLED=true
+CYCLE_ANCHOR_TOPIC=x26     # a device msp-edge publishes once per scan
+CYCLE_TIMEOUT_SEC=6
+```
+
+- The anchor can be the full topic (`holding_register/all/X26`) or just the
+  device name (`x26`, case-insensitive).
+- Pick a device in its own block (the msp-edge startup log lists the blocks;
+  `X16 x1 words, 1 devices` is ideal), so it marks the boundary between scans.
+- While cycles are detected the legacy flusher is bypassed. If the anchor is
+  never seen, or goes silent for `CYCLE_TIMEOUT_SEC`, the legacy flusher takes
+  over again, so a wrong anchor never stops data — it logs
+  `anchor "…" not seen in 2000 messages`.
+
 ### Machine state case — when "running" counts
 
 `TRIGGER_DEVICE=m34,mcsState` tracks running / idle / downtime

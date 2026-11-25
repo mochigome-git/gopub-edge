@@ -3,6 +3,8 @@ package mqtts
 import (
 	"fmt"
 	"gopub-edge/model"
+	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,7 +20,14 @@ type CycleBuffer struct {
 	timeout     time.Duration        // safety flush if anchor topic stops arriving
 	lastAnchor  time.Time            // time of last anchor topic seen
 	stopTimeout chan struct{}        // signals timeout goroutine to stop
+
+	unmatched     int  // messages received before the anchor was ever seen
+	warnedNoMatch bool // "anchor never seen" logged once
 }
+
+// anchorWarnAfter is how many messages may arrive without the anchor topic
+// before we log that CYCLE_ANCHOR_TOPIC probably matches nothing.
+const anchorWarnAfter = 2000
 
 // NewCycleBuffer creates a CycleBuffer with the given anchor topic.
 // firstTopic must be the very first D-device topic your PLC publishes each scan cycle.
@@ -45,7 +54,17 @@ func (cb *CycleBuffer) Feed(topic string, msg model.Message) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
-	if topic == cb.firstTopic {
+	if !cb.matchesAnchor(topic) && cb.lastAnchor.IsZero() {
+		cb.unmatched++
+		if cb.unmatched >= anchorWarnAfter && !cb.warnedNoMatch {
+			cb.warnedNoMatch = true
+			log.Printf("[CycleBuffer] ⚠ anchor %q not seen in %d messages (last topic %q) — "+
+				"check CYCLE_ANCHOR_TOPIC; using the legacy burst flusher meanwhile",
+				cb.firstTopic, cb.unmatched, topic)
+		}
+	}
+
+	if cb.matchesAnchor(topic) {
 		cb.lastAnchor = time.Now()
 
 		// If we have already seen the anchor topic before and have buffered data,
@@ -62,6 +81,33 @@ func (cb *CycleBuffer) Feed(topic string, msg model.Message) {
 	if cb.seen {
 		cb.buffer = append(cb.buffer, msg)
 	}
+}
+
+// matchesAnchor accepts the full topic ("holding_register/all/X26") or, when
+// the anchor has no "/", just the device at the end of the topic, ignoring
+// case ("x26" matches ".../X26").
+func (cb *CycleBuffer) matchesAnchor(topic string) bool {
+	if topic == cb.firstTopic {
+		return true
+	}
+	if cb.firstTopic == "" || strings.Contains(cb.firstTopic, "/") {
+		return false
+	}
+	last := topic[strings.LastIndex(topic, "/")+1:]
+	return strings.EqualFold(last, cb.firstTopic)
+}
+
+// Active reports whether cycle boundaries are currently being detected:
+// the anchor has been seen and not gone silent for longer than the timeout.
+// While inactive (wrong anchor, PLC restart) the legacy flusher carries the
+// data, so a bad CYCLE_ANCHOR_TOPIC never stops processing.
+func (cb *CycleBuffer) Active() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if !cb.seen || cb.lastAnchor.IsZero() {
+		return false
+	}
+	return cb.timeout <= 0 || time.Since(cb.lastAnchor) < cb.timeout
 }
 
 // Cycles returns a read-only channel that emits a complete []model.Message slice
