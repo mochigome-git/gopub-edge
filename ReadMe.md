@@ -117,6 +117,18 @@ the lot and the cooldown stops the other from creating a second one.
 `x17 NOT in batch (got: …)` means the trigger isn't arriving on `MQTT_TOPIC`
 (wrong topic, register name or case).
 
+### Timeseries — keep short button presses
+
+The timeseries case publishes the latest complete scan every
+`TIMESERIES_INTERVAL_SEC` (default 3 s), so a button pressed for < 1 s
+usually falls between snapshots and is never stored. List such bits in
+`TIMESERIES_HOLD_ON`: if one was ON in any scan since the last publish, the
+next row stores it as 1.
+
+```env
+TIMESERIES_HOLD_ON=x17          # winding meter reset button
+```
+
 ### Cycle mode — one full PLC scan per row
 
 The legacy burst flusher cuts the MQTT stream on a 2 s timer and on 150 ms

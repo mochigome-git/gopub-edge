@@ -3,6 +3,7 @@ package handler
 import (
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,10 @@ import (
 //   TIMESERIES_MIN_REGISTERS=100          (optional, partial-batch guard)
 //   TIMESERIES_EXCLUDE=d0,d1              (optional)
 //   CASE_TS_<output_key>=<plc_register>   (optional rename, e.g. CASE_TS_temperature=d200)
+//   TIMESERIES_HOLD_ON=x17,m50            (optional) bits that were ON at ANY
+//                                         cycle since the last publish are sent
+//                                         as 1 — a < 1 s button press would
+//                                         otherwise fall between snapshots
 
 const timeseriesPrefix = "CASE_TS_"
 
@@ -47,6 +52,7 @@ type timeseriesSampler struct {
 	seq      uint64 // bumped on every accepted complete cycle
 	sentSeq  uint64 // seq of the last published cycle
 	lastSent time.Time
+	heldOn   map[string]bool // TIMESERIES_HOLD_ON registers seen ON since the last publish
 }
 
 var (
@@ -67,6 +73,10 @@ func handleTimeseriesCase(jsonPayloads *utils.SafeJsonPayloads, cfg config.AppCo
 		go tsSampler.run(cfg, interval)
 		log.Printf("[timeseries] ✓ sampler started — every %v", interval)
 	})
+
+	// Remember HOLD_ON bits from every batch, complete or not, so a short
+	// pulse is never lost between the 3 s snapshots.
+	tsSampler.noteHeldOn(jsonPayloads)
 
 	snapshot, ok := buildTimeseriesSnapshot(jsonPayloads)
 	if !ok {
@@ -162,6 +172,7 @@ func (s *timeseriesSampler) run(cfg config.AppConfig, interval time.Duration) {
 				continue // no new complete cycle since last publish
 			}
 			data := utils.DeepCopyMap(s.latest)
+			held := s.applyHeldOnLocked(data)
 			sampledAt := s.latestAt
 			s.sentSeq = s.seq
 			prev := s.lastSent
@@ -199,6 +210,9 @@ func (s *timeseriesSampler) run(cfg config.AppConfig, interval time.Duration) {
 				log.Printf("[timeseries] ✓ published #%d — %d registers, sampled %s",
 					tsPublished, len(data), sampledAt.Format("15:04:05.000"))
 			}
+			if len(held) > 0 {
+				log.Printf("[timeseries] held ON since last publish: %s", strings.Join(held, ", "))
+			}
 		}
 	}
 }
@@ -215,4 +229,65 @@ func timeseriesInterval() time.Duration {
 		sec = 3
 	}
 	return time.Duration(sec) * time.Second
+}
+
+// timeseriesHoldOn returns the lower-case TIMESERIES_HOLD_ON registers.
+func timeseriesHoldOn() []string {
+	var regs []string
+	for _, r := range strings.Split(os.Getenv("TIMESERIES_HOLD_ON"), ",") {
+		if r = strings.ToLower(strings.TrimSpace(r)); r != "" {
+			regs = append(regs, r)
+		}
+	}
+	return regs
+}
+
+// noteHeldOn records every TIMESERIES_HOLD_ON register that is ON (non-zero)
+// in this batch.
+func (s *timeseriesSampler) noteHeldOn(jsonPayloads *utils.SafeJsonPayloads) {
+	regs := timeseriesHoldOn()
+	if len(regs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range regs {
+		raw, ok := jsonPayloads.Get(r)
+		if !ok {
+			continue
+		}
+		if v, num := readNumber(raw); num && v != 0 {
+			if s.heldOn == nil {
+				s.heldOn = make(map[string]bool)
+			}
+			s.heldOn[r] = true
+		}
+	}
+}
+
+// applyHeldOnLocked sets every held register to 1 in data (under its
+// CASE_TS_ rename if any), clears the hold and returns the names it set.
+// Caller holds s.mu.
+func (s *timeseriesSampler) applyHeldOnLocked(data map[string]any) []string {
+	if len(s.heldOn) == 0 {
+		return nil
+	}
+	rename := map[string]string{}
+	for newKey, register := range utils.GetKeyTransformationsFromEnv(timeseriesPrefix) {
+		rename[strings.ToLower(register)] = strings.ToLower(newKey)
+	}
+	var set []string
+	for r := range s.heldOn {
+		key := r
+		if name, ok := rename[r]; ok {
+			key = name
+		}
+		if v, ok := readNumber(data[key]); !ok || v == 0 {
+			set = append(set, key)
+		}
+		data[key] = float64(1)
+	}
+	s.heldOn = nil
+	sort.Strings(set)
+	return set
 }
