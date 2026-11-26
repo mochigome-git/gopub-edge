@@ -69,3 +69,21 @@ func TestLotButtonAndMeterResetMakeOneLot(t *testing.T) {
 		t.Fatalf("lots = %d, want 1 (cooldown stops the second trigger)", *n)
 	}
 }
+
+func TestRunLength(t *testing.T) {
+	if got := runLength([]bool{false, false, false, true, true, false}); got != "0×3 1×2 0×1" {
+		t.Fatalf("runLength = %q", got)
+	}
+}
+
+func TestLotDebugDoesNotPanic(t *testing.T) {
+	t.Setenv("LOT_DEBUG", "true")
+	t.Setenv("MACHINE_ID", "m1")
+	t.Setenv(lotResetRegisterEnv, "d676")
+	t.Setenv(lotRequirePrefix+"d392", ">200")
+	countLots(t)
+	s := newLotSession()
+	handleLotCase(s, x17TK, lotFrame(map[string]any{"d392": 1.0}), []model.Message{{Address: "D392", Value: 1.0}}, config.AppConfig{}, nil)
+	msgs, merged := meterBatch(1, 500.0, 0.0)
+	handleLotCase(s, x17TK, lotFrame(merged), msgs, config.AppConfig{}, nil)
+}

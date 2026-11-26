@@ -108,6 +108,15 @@ the lot and the cooldown stops the other from creating a second one.
 `CASE_LOT_REQUIRE_*` applies to both. The counter must be on the service's
 `MQTT_TOPIC`.
 
+**Troubleshooting:** `LOT_DEBUG=true` prints one line per batch, e.g.
+
+```
+[lot-debug] batch 312 msgs | x17 n=45 seq=[0×20 1×5 0×20] prev false->false edge=true | d676 n=45 first=8127 last=0 min=0 max=8127 reset=true | conds: d392 > 200 met=true last=0; d418 > 500 met=true last=210
+```
+
+`x17 NOT in batch (got: …)` means the trigger isn't arriving on `MQTT_TOPIC`
+(wrong topic, register name or case).
+
 ### Cycle mode — one full PLC scan per row
 
 The legacy burst flusher cuts the MQTT stream on a 2 s timer and on 150 ms

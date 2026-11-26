@@ -41,6 +41,9 @@ func handleLotCase(
 	// lost. Walk every reading in order and look for an OFF->ON edge.
 	values := triggerReadings(tk.TriggerKey, messages, jsonPayloads)
 	buttonEdge := false
+	session.Mutex.Lock()
+	prevBefore := session.LotTriggerPrev
+	session.Mutex.Unlock()
 	if len(values) > 0 {
 		session.Mutex.Lock()
 		prev := session.LotTriggerPrev
@@ -56,6 +59,7 @@ func handleLotCase(
 
 	// Or the counter the button resets (CASE_LOT_RESET_REGISTER).
 	resetEdge, resetDetail := lotResetEdge(session, messages, jsonPayloads)
+	logLotDebug(session, tk.TriggerKey, messages, values, prevBefore, buttonEdge, resetEdge, conds)
 
 	if !buttonEdge && !resetEdge {
 		// only act on the OFF->ON edge, ignore held/repeated ON scans
@@ -89,6 +93,9 @@ func handleLotCase(
 	}
 
 	machineID := os.Getenv("MACHINE_ID")
+	if lotDebugOn() {
+		log.Printf("[lot-debug] %s passed cooldown and conditions — MACHINE_ID=%q", source, machineID)
+	}
 	if machineID == "" {
 		log.Printf("handleLotCase: MACHINE_ID not set — skipping lot creation")
 		return
