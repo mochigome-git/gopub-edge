@@ -8,6 +8,7 @@ import (
 	"gopub-edge/config"
 	"gopub-edge/internal/session"
 	"gopub-edge/internal/utils"
+	"gopub-edge/model"
 )
 
 // handleLotCase fires exactly once on the OFF->ON edge of the configured
@@ -22,6 +23,7 @@ func handleLotCase(
 	session *session.Session,
 	tk utils.TriggerKey,
 	jsonPayloads *utils.SafeJsonPayloads,
+	messages []model.Message,
 	cfg config.AppConfig,
 	rMsgJSONChan <-chan string,
 ) {
@@ -29,32 +31,31 @@ func handleLotCase(
 	// poll itself, whose meter value may be the last before it is reset.
 	conds := loadLotConditions()
 	if len(conds) > 0 {
-		updateLotConditions(session, conds, jsonPayloads)
+		updateLotConditions(session, conds, jsonPayloads, messages)
 	}
 
-	buttonVal, exists := jsonPayloads.Get(tk.TriggerKey)
-	if !exists {
-		return
-	}
-	var buttonOn bool
-	switch v := buttonVal.(type) {
-	case float64:
-		buttonOn = v == 1
-	case string:
-		buttonOn = v == "1"
-	case bool:
-		buttonOn = v
-	default:
-		log.Printf("handleLotCase: trigger key %q has unexpected type %T (value %v) — ignoring message", tk.TriggerKey, buttonVal, buttonVal)
+	// A batch can hold many readings of the trigger (msp-edge polls several
+	// times a second, the flusher batches up to 2 s), but jsonPayloads keeps
+	// only the last one — a short press in the middle of a batch would be
+	// lost. Walk every reading in order and look for an OFF->ON edge.
+	values := triggerReadings(tk.TriggerKey, messages, jsonPayloads)
+	if len(values) == 0 {
 		return
 	}
 
 	session.Mutex.Lock()
-	wasOn := session.LotTriggerPrev
-	session.LotTriggerPrev = buttonOn
+	prev := session.LotTriggerPrev
+	rising := false
+	for _, on := range values {
+		if on && !prev {
+			rising = true
+		}
+		prev = on
+	}
+	session.LotTriggerPrev = prev
 	session.Mutex.Unlock()
 
-	if !buttonOn || wasOn {
+	if !rising {
 		// only act on the OFF->ON edge, ignore held/repeated ON scans
 		return
 	}
@@ -95,4 +96,42 @@ var publishLot = func(session *session.Session, machineID string, cfg config.App
 	session.Mutex.Lock()
 	session.ProcessedPayloadsMap = make(map[string]map[string]any)
 	session.Mutex.Unlock()
+}
+
+// triggerReadings returns every reading of the trigger register in this
+// batch, oldest first. Falls back to the merged payload value when the raw
+// messages aren't available.
+func triggerReadings(key string, messages []model.Message, jsonPayloads *utils.SafeJsonPayloads) []bool {
+	var out []bool
+	for _, m := range messages {
+		if !strings.EqualFold(m.Address, key) {
+			continue
+		}
+		if on, ok := buttonOn(key, m.Value); ok {
+			out = append(out, on)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if v, exists := jsonPayloads.Get(key); exists {
+		if on, ok := buttonOn(key, v); ok {
+			out = append(out, on)
+		}
+	}
+	return out
+}
+
+func buttonOn(key string, v any) (bool, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x == 1, true
+	case string:
+		return x == "1", true
+	case bool:
+		return x, true
+	default:
+		log.Printf("handleLotCase: trigger key %q has unexpected type %T (value %v) — ignoring", key, v, v)
+		return false, false
+	}
 }

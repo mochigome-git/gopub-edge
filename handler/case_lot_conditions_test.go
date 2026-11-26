@@ -77,7 +77,7 @@ func TestLotNoConditionsEveryEdge(t *testing.T) {
 	n := countLots(t)
 	s := newLotSession()
 	for _, v := range []float64{0, 1, 1, 0, 1} {
-		handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": v}), config.AppConfig{}, nil)
+		handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": v}), nil, config.AppConfig{}, nil)
 	}
 	if *n != 2 {
 		t.Fatalf("lots = %d, want 2", *n)
@@ -94,7 +94,7 @@ func TestLotLatchedConditions(t *testing.T) {
 	n := countLots(t)
 	s := newLotSession()
 	step := func(x26, meter, speed float64) {
-		handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": x26, "d418": meter, "d392": speed}), config.AppConfig{}, nil)
+		handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": x26, "d418": meter, "d392": speed}), nil, config.AppConfig{}, nil)
 	}
 
 	step(0, 0, 0)
@@ -126,13 +126,13 @@ func TestLotNowMode(t *testing.T) {
 	t.Setenv("CASE_LOT_REQUIRE_m50", "=1")
 	n := countLots(t)
 	s := newLotSession()
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d418": float64(2000), "m50": float64(1)}), config.AppConfig{}, nil)
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1), "d418": float64(0), "m50": float64(1)}), config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d418": float64(2000), "m50": float64(1)}), nil, config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1), "d418": float64(0), "m50": float64(1)}), nil, config.AppConfig{}, nil)
 	if *n != 0 {
 		t.Fatalf("now mode used a past value")
 	}
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d418": float64(2000), "m50": float64(1)}), config.AppConfig{}, nil)
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1), "d418": "2000", "m50": true}), config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d418": float64(2000), "m50": float64(1)}), nil, config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1), "d418": "2000", "m50": true}), nil, config.AppConfig{}, nil)
 	if *n != 1 {
 		t.Fatalf("lots = %d, want 1", *n)
 	}
@@ -149,13 +149,13 @@ func TestLotManyConditionsAndBadEntry(t *testing.T) {
 	t.Setenv("CASE_LOT_REQUIRE_d5", "oops")
 	n := countLots(t)
 	s := newLotSession()
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d1": float64(5), "d2": float64(5), "d3": float64(5)}), config.AppConfig{}, nil)
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1)}), config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d1": float64(5), "d2": float64(5), "d3": float64(5)}), nil, config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1)}), nil, config.AppConfig{}, nil)
 	if *n != 0 {
 		t.Fatalf("d4 never received but a lot was created")
 	}
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d4": float64(9)}), config.AppConfig{}, nil)
-	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1)}), config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(0), "d4": float64(9)}), nil, config.AppConfig{}, nil)
+	handleLotCase(s, lotTK, lotFrame(map[string]any{"x26": float64(1)}), nil, config.AppConfig{}, nil)
 	if *n != 1 {
 		t.Fatalf("lots = %d, want 1 once all four held", *n)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"gopub-edge/internal/session"
 	"gopub-edge/internal/utils"
+	"gopub-edge/model"
 )
 
 // Conditions that must hold before the lot trigger may create a new lot.
@@ -169,7 +170,7 @@ func readNumber(v any) (float64, bool) {
 // updateLotConditions records this poll's values: the last value seen per
 // register (for logs) and, per condition, whether it has been true since
 // the last lot. Caller holds no lock.
-func updateLotConditions(sess *session.Session, conds []lotCondition, jsonPayloads *utils.SafeJsonPayloads) {
+func updateLotConditions(sess *session.Session, conds []lotCondition, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message) {
 	sess.Mutex.Lock()
 	defer sess.Mutex.Unlock()
 	if sess.LotCondMet == nil {
@@ -177,6 +178,17 @@ func updateLotConditions(sess *session.Session, conds []lotCondition, jsonPayloa
 	}
 	if sess.LotCondLast == nil {
 		sess.LotCondLast = make(map[string]float64)
+	}
+	// Every reading in the batch counts for the latches, not only the last.
+	for _, m := range messages {
+		for _, c := range conds {
+			if !strings.EqualFold(m.Address, c.Register) {
+				continue
+			}
+			if v, ok := readNumber(m.Value); ok && c.eval(v) {
+				sess.LotCondMet[c.String()] = true
+			}
+		}
 	}
 	for _, c := range conds {
 		raw, ok := jsonPayloads.Get(c.Register)

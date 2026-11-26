@@ -46,7 +46,7 @@ func Trigger(
 			"weightmcs":         func() { handleWeightMCSCase(session, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			// in Trigger(), inside caseHandlers map:
 			"job":        func() { handleJobCase(session, tk, jsonPayloads, messages, cfg, rMsgJSONChan) },
-			"lot":        func() { handleLotCase(session, tk, jsonPayloads, cfg, rMsgJSONChan) },
+			"lot":        func() { handleLotCase(session, tk, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			"mcsState":   func() { handleMCSStateCase(session, tk, jsonPayloads, messages, cfg, rMsgJSONChan) },
 			"timeseries": func() { handleTimeseriesCase(jsonPayloads, cfg) },
 		}
