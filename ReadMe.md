@@ -117,6 +117,49 @@ the lot and the cooldown stops the other from creating a second one.
 `x17 NOT in batch (got: …)` means the trigger isn't arriving on `MQTT_TOPIC`
 (wrong topic, register name or case).
 
+### Surviving restarts and long outages
+
+**State file.** Job progress (start time, collected fields, operator), lot
+conditions / meter baseline and momentary state buttons are mirrored to
+`$STATE_DIR/session-<case>.json` and restored at start.
+
+```env
+STATE_DIR=state            # default ./state
+STATE_MAX_AGE_HOURS=24     # older files are ignored and deleted
+STATE_SAVE_SEC=10          # routine changes at most this often (SD card wear)
+# STATE_PERSIST=false      # turn off
+```
+
+- Written only when something changed; job start/end, lot latches and
+  buttons at once, rising counters at most every `STATE_SAVE_SEC`.
+- Written atomically (temp file + rename) — a power cut can't corrupt it.
+- **Deleted** when nothing is left to keep (no job running, no latch, …);
+  stale or unreadable files are deleted at start.
+- The machine state itself is not restored on purpose: the first transition
+  after a restart has no `prev_*`, so unobserved time isn't misattributed.
+
+**Disk outbox.** While EMQX is unreachable, posts are written to
+`$STATE_DIR/outbox/` (one file each) instead of paho's memory queue, and sent
+oldest-first after the reconnect; each file is deleted once the broker
+confirms it. New posts queue behind waiting ones, so order is kept.
+
+```env
+OUTBOX_MAX_MB=500          # cap; the oldest READINGS are dropped first,
+                           # job / lot / state posts are kept
+# OUTBOX=false             # turn off
+```
+
+Heartbeats are never queued. Rough size: timeseries every 3 s ≈ 150 MB per
+day offline; sending a day's backlog takes ~30–60 min after the reconnect.
+
+**Docker:** give each container its own volume, or the state is lost with
+the container:
+
+```yaml
+    volumes:
+      - ./state/mcs-lot:/app/state
+```
+
 ### Timeseries — keep short button presses
 
 The timeseries case publishes the latest complete scan every

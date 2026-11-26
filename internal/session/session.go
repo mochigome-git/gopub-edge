@@ -86,6 +86,11 @@ type Session struct {
 	RunRawSince  time.Time          // when the raw condition last flipped
 	RunLogged    bool
 	RunLoggedVal bool
+
+	// persist.go bookkeeping
+	persistLastFull  []byte
+	persistLastKey   string
+	persistLastWrite time.Time
 }
 
 func NewSession() *Session {
@@ -124,6 +129,7 @@ func GetOrCreateSession(caseKey string) *Session {
 	}
 
 	newSession := NewSession()
+	newSession.loadState(caseKey) // restore progress saved before a restart
 	sessionStore[caseKey] = newSession
 	return newSession
 }

@@ -48,6 +48,8 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
+
+	"gopub-edge/internal/session"
 )
 
 // publishWait caps how long a publish blocks. paho keeps a QoS 1 message
@@ -89,6 +91,9 @@ type Publisher struct {
 
 	replySub string // reply wildcard, for Resubscribe
 
+	ob     *outbox       // disk queue for posts made while EMQX is down (nil = off)
+	stopOb chan struct{} // stops the outbox drainer
+
 	mu      sync.Mutex
 	pending map[string]chan ReplyPayload // keyed by correlation id, extracted from the reply's MQTT topic
 }
@@ -125,6 +130,12 @@ func NewPublisher(pubOpts *mqtt.ClientOptions, replyClient mqtt.Client, requestT
 	}
 	log.Printf("[mqttpub] ✓ connected — publishing requests to %q, listening for replies on %q", requestTopic, subTopic)
 	p.replySub = subTopic
+
+	p.ob = outboxFromEnv(session.StateDir())
+	if p.ob != nil {
+		p.stopOb = make(chan struct{})
+		go p.runOutbox()
+	}
 
 	return p, nil
 }
@@ -262,15 +273,89 @@ func (p *Publisher) PublishAndAwaitReplyLocal(ctx context.Context, localTopic st
 // Publish is fire-and-forget: no reply_topic is attached, so the
 // downstream insert engine knows not to reply. Used for the plain
 // "patch" path where nothing in gopub-edge needs the result back.
+//
+// While EMQX is unreachable (or older posts are still waiting) the post
+// goes to the disk outbox and is sent in order after the reconnect.
+// Heartbeats are skipped instead of queued.
 func (p *Publisher) Publish(data map[string]any) error {
 	payload, err := json.Marshal(flattenEnvelope(data, ""))
 	if err != nil {
 		return fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
+	kind := postKind(data)
+	online := p.pubClient.IsConnectionOpen()
+	if kind == "heartbeat" && !online {
+		return nil
+	}
+	if p.ob != nil && kind != "heartbeat" && (!online || p.ob.pending() > 0) {
+		if err := p.ob.put(payload, kind); err != nil {
+			return fmt.Errorf("mqttpub: outbox write failed: %w", err)
+		}
+		return nil
+	}
 	if err := waitToken(p.pubClient.Publish(p.requestTopic, 1, false, payload), "publish"); err != nil {
+		if p.ob != nil && kind != "heartbeat" {
+			if oerr := p.ob.put(payload, kind); oerr == nil {
+				return nil // dropped connection between the check and the publish
+			}
+		}
 		return fmt.Errorf("mqttpub: publish failed: %w", err)
 	}
 	return nil
+}
+
+// postKind classifies a post for the outbox: job | lot | state | heartbeat | readings.
+func postKind(data map[string]any) string {
+	if k, ok := data["kind"].(string); ok && k != "" {
+		return k
+	}
+	if st, ok := data["status"].(map[string]any); ok {
+		if k, _ := st["kind"].(string); k == "heartbeat" {
+			return "heartbeat"
+		}
+		if _, ok := st["machine_state"]; ok {
+			return "state"
+		}
+	}
+	return "readings"
+}
+
+// sendConfirmed publishes and only reports success once the broker has
+// acknowledged it — the outbox deletes a file only then.
+func (p *Publisher) sendConfirmed(payload []byte) error {
+	if !p.pubClient.IsConnectionOpen() {
+		return fmt.Errorf("not connected")
+	}
+	t := p.pubClient.Publish(p.requestTopic, 1, false, payload)
+	if !t.WaitTimeout(publishWait) {
+		return fmt.Errorf("not confirmed within %v", publishWait)
+	}
+	return t.Error()
+}
+
+// runOutbox sends queued posts whenever EMQX is connected.
+func (p *Publisher) runOutbox() {
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-p.stopOb:
+			return
+		case <-tick.C:
+			if p.ob.pending() == 0 || !p.pubClient.IsConnectionOpen() {
+				continue
+			}
+			before := p.ob.pending()
+			if sent := p.ob.drain(p.sendConfirmed); sent > 0 {
+				left := p.ob.pending()
+				if left == 0 {
+					log.Printf("[outbox] ✓ sent all %d queued post(s) — outbox empty", sent)
+				} else {
+					log.Printf("[outbox] sent %d of %d queued post(s), %d left", sent, before, left)
+				}
+			}
+		}
+	}
 }
 
 // Close disconnects the request-publishing client only. The reply-listen
@@ -278,6 +363,10 @@ func (p *Publisher) Publish(data map[string]any) error {
 // and is not disconnected here — its lifecycle belongs to whoever created
 // it (e.g. gopub-edge's main.go, which shares it with the PLC subscriber).
 func (p *Publisher) Close() {
+	if p.stopOb != nil {
+		close(p.stopOb)
+		p.stopOb = nil
+	}
 	if p.pubClient != nil && p.pubClient.IsConnected() {
 		p.pubClient.Disconnect(250)
 	}

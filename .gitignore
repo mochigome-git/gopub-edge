@@ -23,3 +23,6 @@ root/certs/*
 # Go workspace file
 go.work
 .env.local*
+
+# runtime state + outbox (persist.go, outbox.go)
+state/

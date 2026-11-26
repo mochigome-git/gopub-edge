@@ -58,6 +58,7 @@ func ProcessMQTTData(
 			// Change Payloads title or delete the extra devices and etc..
 			Trigger(session, jsonPayloads, messages, cfg, receivedMessagesJSONChan, plcApp)
 			jsonPayloads.Clear()
+			session.SaveState(caseKey)
 
 			return
 
