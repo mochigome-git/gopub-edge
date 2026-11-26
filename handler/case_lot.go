@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"gopub-edge/config"
 	"gopub-edge/internal/session"
@@ -39,24 +40,41 @@ func handleLotCase(
 	// only the last one — a short press in the middle of a batch would be
 	// lost. Walk every reading in order and look for an OFF->ON edge.
 	values := triggerReadings(tk.TriggerKey, messages, jsonPayloads)
-	if len(values) == 0 {
+	buttonEdge := false
+	if len(values) > 0 {
+		session.Mutex.Lock()
+		prev := session.LotTriggerPrev
+		for _, on := range values {
+			if on && !prev {
+				buttonEdge = true
+			}
+			prev = on
+		}
+		session.LotTriggerPrev = prev
+		session.Mutex.Unlock()
+	}
+
+	// Or the counter the button resets (CASE_LOT_RESET_REGISTER).
+	resetEdge, resetDetail := lotResetEdge(session, messages, jsonPayloads)
+
+	if !buttonEdge && !resetEdge {
+		// only act on the OFF->ON edge, ignore held/repeated ON scans
 		return
 	}
-
-	session.Mutex.Lock()
-	prev := session.LotTriggerPrev
-	rising := false
-	for _, on := range values {
-		if on && !prev {
-			rising = true
-		}
-		prev = on
+	source := tk.TriggerKey + " ON"
+	if !buttonEdge {
+		source = resetDetail
 	}
-	session.LotTriggerPrev = prev
-	session.Mutex.Unlock()
 
-	if !rising {
-		// only act on the OFF->ON edge, ignore held/repeated ON scans
+	// The button edge and the meter reset usually both arrive for one
+	// press; only the first may create a lot.
+	now := time.Now()
+	session.Mutex.Lock()
+	last := session.LotLastCreated
+	session.Mutex.Unlock()
+	if cd := lotCooldown(); !last.IsZero() && now.Sub(last) < cd {
+		log.Printf("handleLotCase: %s ignored — lot created %s ago (cooldown %s)",
+			source, now.Sub(last).Round(time.Second), cd)
 		return
 	}
 
@@ -64,8 +82,8 @@ func handleLotCase(
 		mode := lotConditionMode()
 		ok, unmet := lotConditionsSatisfied(session, conds, mode, jsonPayloads)
 		if !ok {
-			log.Printf("handleLotCase: %s ON ignored — lot continues; unmet (%s): %s",
-				tk.TriggerKey, mode, strings.Join(unmet, ", "))
+			log.Printf("handleLotCase: %s ignored — lot continues; unmet (%s): %s",
+				source, mode, strings.Join(unmet, ", "))
 			return
 		}
 	}
@@ -76,10 +94,16 @@ func handleLotCase(
 		return
 	}
 	if len(conds) > 0 {
-		log.Printf("handleLotCase: %s ON — all %d conditions met, creating new lot", tk.TriggerKey, len(conds))
+		log.Printf("handleLotCase: %s — all %d conditions met, creating new lot", source, len(conds))
 		resetLotConditions(session)
 	}
 
+	if len(conds) == 0 {
+		log.Printf("handleLotCase: %s — creating new lot", source)
+	}
+	session.Mutex.Lock()
+	session.LotLastCreated = now
+	session.Mutex.Unlock()
 	publishLot(session, machineID, cfg, rMsgJSONChan)
 }
 

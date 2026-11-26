@@ -50,6 +50,11 @@ type Session struct {
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection
+	// CASE_LOT_RESET_REGISTER (lot_reset.go): last counter value seen,
+	// and when the last lot was created (for CASE_LOT_COOLDOWN_SEC).
+	LotResetLast   float64
+	LotResetHave   bool
+	LotLastCreated time.Time
 	// CASE_LOT_REQUIRE_* (lot_conditions.go): condition text -> true once it
 	// has held since the last lot was created; last value per register.
 	LotCondMet  map[string]bool

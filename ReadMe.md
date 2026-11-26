@@ -93,6 +93,21 @@ CASE_LOT_REQUIRE_d392=>200      # speed went above 200
 - Conditions met before a gopub-edge restart are not remembered.
 - No `CASE_LOT_REQUIRE_*` → every press creates a lot, as before.
 
+**Lot from a counter reset (no short pulse to catch).** If the lot button
+also resets a counter, watch the counter instead — it stays reset, so a slow
+reader still sees it:
+
+```env
+CASE_LOT_RESET_REGISTER=d676     # winding meter, reset by the button
+CASE_LOT_RESET_MIN_DROP=100      # drop between two readings that counts as a reset
+CASE_LOT_COOLDOWN_SEC=30         # default 30 with RESET_REGISTER, else 0
+```
+
+The button edge and the counter drop both work; whichever comes first creates
+the lot and the cooldown stops the other from creating a second one.
+`CASE_LOT_REQUIRE_*` applies to both. The counter must be on the service's
+`MQTT_TOPIC`.
+
 ### Cycle mode — one full PLC scan per row
 
 The legacy burst flusher cuts the MQTT stream on a 2 s timer and on 150 ms
