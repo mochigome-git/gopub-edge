@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"gopub-edge/model"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type CycleBuffer struct {
 	lastAnchor  time.Time            // time of last anchor topic seen
 	stopTimeout chan struct{}        // signals timeout goroutine to stop
 
+	flushed       int  // cycles emitted (for quiet logging)
 	unmatched     int  // messages received before the anchor was ever seen
 	warnedNoMatch bool // "anchor never seen" logged once
 }
@@ -28,6 +30,9 @@ type CycleBuffer struct {
 // anchorWarnAfter is how many messages may arrive without the anchor topic
 // before we log that CYCLE_ANCHOR_TOPIC probably matches nothing.
 const anchorWarnAfter = 2000
+
+// CYCLE_DEBUG=true logs every cycle; otherwise only the first and every 1000th.
+var cycleDebug = os.Getenv("CYCLE_DEBUG") == "true"
 
 // NewCycleBuffer creates a CycleBuffer with the given anchor topic.
 // firstTopic must be the very first D-device topic your PLC publishes each scan cycle.
@@ -147,9 +152,13 @@ func (cb *CycleBuffer) flushLocked(reason string) {
 	copy(cycle, cb.buffer)
 	cb.buffer = cb.buffer[:0]
 
+	cb.flushed++
 	select {
 	case cb.cycleReady <- cycle:
-		fmt.Printf("[CycleBuffer] ✓ %s\n", reason)
+		// first cycle, then every 1000th — unless CYCLE_DEBUG=true
+		if cycleDebug || cb.flushed == 1 || cb.flushed%1000 == 0 {
+			fmt.Printf("[CycleBuffer] ✓ %s (cycle #%d)\n", reason, cb.flushed)
+		}
 	default:
 		// Consumer is too slow — drop the cycle to avoid blocking the MQTT handler.
 		// Increase channel buffer in NewCycleBuffer if this happens frequently.

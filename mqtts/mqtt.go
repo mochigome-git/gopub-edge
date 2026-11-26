@@ -289,7 +289,9 @@ func consumeCycles(cb *CycleBuffer, receivedMessagesJSONChan chan<- string, stop
 
 			select {
 			case receivedMessagesJSONChan <- string(jsonData):
-				log.Printf("[CycleConsumer] ✓ Dispatched cycle: %d messages", len(cycle))
+				if cycleDebug {
+					log.Printf("[CycleConsumer] ✓ Dispatched cycle: %d messages", len(cycle))
+				}
 			default:
 				atomic.AddInt64(&droppedMessagesCount, 1)
 				log.Printf("[CycleConsumer] ⚠ Cycle dropped — channel full (%d messages lost)", len(cycle))

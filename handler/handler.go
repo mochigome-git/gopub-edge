@@ -1,12 +1,16 @@
 package handler
 
 import (
+	"fmt"
 	"gopub-edge/config"
 	"gopub-edge/internal/app"
 	"gopub-edge/internal/session"
 	"gopub-edge/internal/utils"
 	"gopub-edge/model"
+	"log"
 	"os"
+	"strings"
+	"sync"
 )
 
 type AccumCheckFunc func() bool // Check Accumalate Rate if 0 skip process
@@ -22,6 +26,7 @@ func Trigger(
 
 	// Parse trigger keys once
 	triggerKeys := utils.ParseTriggerKey(cfg.Trigger)
+	logTriggerSetupOnce(cfg.Trigger, triggerKeys)
 
 	// Avoiding repeated logic for accum_rate checks
 	isAccRate := func() bool {
@@ -53,6 +58,23 @@ func Trigger(
 		// Check if the current caseKey is in the map, and handle accordingly
 		if handler, exists := caseHandlers[tk.CaseKey]; exists {
 			handler()
+		} else {
+			warnLotOnce(fmt.Sprintf("Trigger: TRIGGER_DEVICE case %q (for %q) is not a known case — nothing runs for it; check spelling/case (e.g. lot, mcsState, job)", tk.CaseKey, tk.TriggerKey))
 		}
 	}
+}
+
+var triggerSetupOnce sync.Once
+
+// logTriggerSetupOnce prints, once at the first batch, how TRIGGER_DEVICE
+// was parsed and whether the debug switches are on.
+func logTriggerSetupOnce(raw string, keys []utils.TriggerKey) {
+	triggerSetupOnce.Do(func() {
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s→%s", k.TriggerKey, k.CaseKey))
+		}
+		log.Printf("Trigger: TRIGGER_DEVICE=%q parsed as [%s] | LOT_DEBUG=%q CYCLE_DEBUG=%q",
+			raw, strings.Join(parts, ", "), os.Getenv("LOT_DEBUG"), os.Getenv("CYCLE_DEBUG"))
+	})
 }
