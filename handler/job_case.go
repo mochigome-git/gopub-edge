@@ -81,7 +81,39 @@ func handleJobCase(
 		session.JobStartedFromPLC = false
 		session.JobEndedFromPLC = false
 		session.ProcessedPayloadsMap = make(map[string]map[string]any)
+		// Seed text fields entered just before START (see JobPreStart).
+		session.JobFromPreStart = nil
+		for k, v := range session.JobPreStart {
+			if strings.HasPrefix(k, "daily_check_") {
+				continue
+			}
+			session.ProcessedPayloadsMap[k] = map[string]any{k: v}
+			if session.JobFromPreStart == nil {
+				session.JobFromPreStart = make(map[string]bool)
+			}
+			session.JobFromPreStart[k] = true
+		}
+		session.JobPreStart = nil
 		session.Mutex.Unlock()
+	}
+
+	if !buttonOn && !wasOn {
+		// Idle between jobs: remember complete text fields so a name typed
+		// before START survives if the HMI clears it when the job starts.
+		fields, _ := utils.ReadCompleteMultiRegisterFields(
+			jsonPayloads, jobFieldPrefix, []string{"STR", "LI"}, multiRegisterMaxLenOverrides,
+		)
+		if len(fields) > 0 {
+			session.Mutex.Lock()
+			if session.JobPreStart == nil {
+				session.JobPreStart = make(map[string]string)
+			}
+			for k, v := range fields {
+				session.JobPreStart[k] = v
+			}
+			session.Mutex.Unlock()
+		}
+		return
 	}
 
 	if buttonOn {
@@ -137,15 +169,25 @@ func handleJobCase(
 		// ConvertAndStoreModelName via utils.ReadDiscoveredMultiRegisterFields.
 		// job_case doesn't delete consumed keys from jsonPayloads (unlike
 		// case10), so the usedKeys return is discarded here.
-		fields, _ := utils.ReadDiscoveredMultiRegisterFields(
+		// Only fields whose registers ALL arrived in this batch: a split
+		// batch would otherwise decode a cut-off name and overwrite the
+		// full one. Sticky, like the numeric fields: a blank never
+		// replaces a value already captured for this job.
+		fields, partial := utils.ReadCompleteMultiRegisterFields(
 			jsonPayloads, jobFieldPrefix, []string{"STR", "LI"}, multiRegisterMaxLenOverrides,
 		)
+		if len(partial) > 0 && os.Getenv("JOB_DEBUG") == "true" {
+			log.Printf("[job-debug] skipped partial text field(s): %s", strings.Join(partial, ", "))
+		}
 		for k, v := range fields {
 			if strings.HasPrefix(k, "daily_check_") {
 				dailyCheck[k] = v
 				continue
 			}
-			storeJobFieldToSession(session, k, v)
+			storeStickyJobField(session, k, v)
+			session.Mutex.Lock()
+			delete(session.JobFromPreStart, k)
+			session.Mutex.Unlock()
 		}
 
 		// 4-register signed 64-bit numbers (HMI 数値入力, 符号付きBIN64):
@@ -206,6 +248,9 @@ func finishJob(session *session.Session, cfg config.AppConfig, rMsgJSONChan <-ch
 	offSince := session.JobOffSince
 
 	frozen := session.ProcessedPayloadsMap
+	fromPreStart := session.JobFromPreStart
+	session.JobFromPreStart = nil
+	session.JobPreStart = nil
 	session.ProcessedPayloadsMap = make(map[string]map[string]any)
 	session.JobInProgress = false
 	session.JobEnding = false
@@ -234,6 +279,14 @@ func finishJob(session *session.Session, cfg config.AppConfig, rMsgJSONChan <-ch
 	}
 
 	warnMissingSetupFields(frozen)
+	if len(fromPreStart) > 0 {
+		keys := make([]string, 0, len(fromPreStart))
+		for k := range fromPreStart {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		log.Printf("handleJobCase: %v taken from before START — the registers were empty during the job", keys)
+	}
 
 	// No manually maintained keys list. job_summary.go already knows
 	// which of these have dedicated columns (total_output, model_name,

@@ -47,6 +47,12 @@ type Session struct {
 	JobEnding    bool
 	JobOffSince  time.Time // when the trigger first read OFF
 	JobOffFrames int       // consecutive OFF frames seen since JobOffSince
+	// Text fields (operator, ...) read completely while idle since the last
+	// job ended — seeds the next job, in case the HMI/PLC clears them when
+	// START is pressed. ON frames still overwrite.
+	JobPreStart map[string]string
+	// Fields that came only from JobPreStart in the current job (for logs).
+	JobFromPreStart map[string]bool
 
 	// ── lot case ──────────────────────────────────────
 	LotTriggerPrev bool // tracks previous scan's button state for edge detection

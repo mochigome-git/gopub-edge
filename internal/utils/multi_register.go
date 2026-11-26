@@ -3,6 +3,7 @@
 package utils
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -104,4 +105,36 @@ func ReadDiscoveredMultiRegisterFields(
 		}
 	}
 	return result, allUsedKeys
+}
+
+// ReadCompleteMultiRegisterFields is ReadDiscoveredMultiRegisterFields but
+// only returns a field when EVERY register configured for it is present in
+// this batch. A batch split by the burst flusher can carry only some of a
+// field's registers; decoding those gives a cut-off value (e.g. half an
+// operator name), which must not replace a complete one.
+func ReadCompleteMultiRegisterFields(
+	jsonPayloads *SafeJsonPayloads,
+	prefix string,
+	typeMarkers []string,
+	maxLenOverrides map[string]int,
+) (complete map[string]string, partial []string) {
+	complete = make(map[string]string)
+	for _, spec := range DiscoverMultiRegisterSpecs(prefix, typeMarkers) {
+		configured := 0
+		for i := 0; i <= spec.MaxIdx; i++ {
+			if os.Getenv(fmt.Sprintf("%s%d", spec.EnvPrefix, i)) != "" {
+				configured++
+			}
+		}
+		val, used := ReadMultiRegisterString(jsonPayloads, spec.EnvPrefix, spec.MaxIdx, maxLenOverrides[spec.OutputKey])
+		switch {
+		case len(used) == 0:
+			// field not in this batch at all
+		case len(used) < configured:
+			partial = append(partial, fmt.Sprintf("%s (%d/%d registers)", spec.OutputKey, len(used), configured))
+		case val != "":
+			complete[spec.OutputKey] = val
+		}
+	}
+	return complete, partial
 }
