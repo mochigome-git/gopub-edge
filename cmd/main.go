@@ -78,7 +78,9 @@ func main() {
 	// reason (bad CA, hostname/SNI mismatch, network drop) if TLS is the
 	// problem, before we even try the real MQTT connect.
 	if err := mqttpub.PreflightTLS(emqxOpts); err != nil {
-		logger.Fatalf("EMQX TLS preflight failed: %v", err)
+		// Not fatal: the internet may just be down at boot. A real cert
+		// problem keeps showing up here and in the reconnect errors.
+		logger.Printf("⚠ EMQX TLS preflight failed (continuing, will keep retrying): %v", err)
 	}
 
 	pubOpts, err := mqttpub.BuildEMQXClientOptions(emqxOpts)
@@ -100,6 +102,7 @@ func main() {
 		logger.Fatalf("Failed to connect EMQX publisher: %v", err)
 	}
 	patch.Pub = pub
+	mqtts.OnReconnect(pub.Resubscribe)
 	defer pub.Close()
 
 	// --- Heartbeat — periodic liveness ping over the same publish path ---

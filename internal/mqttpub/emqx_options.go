@@ -88,6 +88,10 @@ func BuildEMQXClientOptions(o EMQXOptions) (*mqtt.ClientOptions, error) {
 	opts.SetCleanSession(true)
 	opts.SetAutoReconnect(true)
 	opts.SetMaxReconnectInterval(30 * time.Second)
+	// Keep retrying the FIRST connect too, so gopub-edge can start while
+	// the internet is down; publishes are queued until it connects.
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(10 * time.Second)
 
 	if o.UseTLS {
 		tlsConfig, err := buildTLSConfigFromCerts(o.CACert, o.ClientCert, o.ClientKey)

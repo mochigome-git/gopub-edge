@@ -50,6 +50,23 @@ import (
 	"github.com/google/uuid"
 )
 
+// publishWait caps how long a publish blocks. paho keeps a QoS 1 message
+// in its store while the broker connection is down and sends it after the
+// reconnect even if nobody is waiting any more — so the caller can move on.
+// Waiting without a limit froze the whole handler loop (no PLC frames, no
+// job/lot/state detection) for as long as the internet was down.
+const publishWait = 10 * time.Second
+
+// waitToken waits up to publishWait. A timeout is not a lost message —
+// it means "queued, will be sent on reconnect".
+func waitToken(t mqtt.Token, what string) error {
+	if !t.WaitTimeout(publishWait) {
+		log.Printf("[mqttpub] ⚠ %s not confirmed within %v — broker unreachable? queued in memory, sent on reconnect (lost if gopub-edge restarts first)", what, publishWait)
+		return nil
+	}
+	return t.Error()
+}
+
 // ReplyPayload is what the downstream insert engine publishes back on the
 // per-request reply topic once it has finished the insert/upsert.
 type ReplyPayload struct {
@@ -70,6 +87,8 @@ type Publisher struct {
 	requestTopic string // e.g. "gopub-edge/insert/request" — published via pubClient
 	replyPrefix  string // e.g. "gopub-edge/reply/" — replies arrive here via replyClient, keyed by replyPrefix+correlation_id
 
+	replySub string // reply wildcard, for Resubscribe
+
 	mu      sync.Mutex
 	pending map[string]chan ReplyPayload // keyed by correlation id, extracted from the reply's MQTT topic
 }
@@ -88,7 +107,12 @@ func NewPublisher(pubOpts *mqtt.ClientOptions, replyClient mqtt.Client, requestT
 	}
 
 	pubClient := mqtt.NewClient(pubOpts)
-	if token := pubClient.Connect(); token.Wait() && token.Error() != nil {
+	// With ConnectRetry the token only completes once connected. Don't
+	// block start-up on the internet: local PLC handling (job/lot/state
+	// detection) must run even while EMQX is unreachable.
+	if token := pubClient.Connect(); !token.WaitTimeout(15 * time.Second) {
+		log.Printf("[mqttpub] ⚠ EMQX not reachable yet — starting anyway, retrying in the background; requests are queued until it connects")
+	} else if token.Error() != nil {
 		return nil, fmt.Errorf("mqttpub: publish client connect failed: %w", token.Error())
 	}
 	p.pubClient = pubClient
@@ -100,6 +124,7 @@ func NewPublisher(pubOpts *mqtt.ClientOptions, replyClient mqtt.Client, requestT
 		return nil, fmt.Errorf("mqttpub: subscribe to %s failed: %w", subTopic, token.Error())
 	}
 	log.Printf("[mqttpub] ✓ connected — publishing requests to %q, listening for replies on %q", requestTopic, subTopic)
+	p.replySub = subTopic
 
 	return p, nil
 }
@@ -176,8 +201,8 @@ func (p *Publisher) PublishAndAwaitReply(ctx context.Context, data map[string]an
 		return ReplyPayload{}, fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
 
-	if token := p.pubClient.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
-		return ReplyPayload{}, fmt.Errorf("mqttpub: publish failed: %w", token.Error())
+	if err := waitToken(p.pubClient.Publish(p.requestTopic, 1, false, payload), "request"); err != nil {
+		return ReplyPayload{}, fmt.Errorf("mqttpub: publish failed: %w", err)
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -219,8 +244,8 @@ func (p *Publisher) PublishAndAwaitReplyLocal(ctx context.Context, localTopic st
 		return ReplyPayload{}, fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
 
-	if token := p.replyClient.Publish(localTopic, 1, false, payload); token.Wait() && token.Error() != nil {
-		return ReplyPayload{}, fmt.Errorf("mqttpub: local publish failed: %w", token.Error())
+	if err := waitToken(p.replyClient.Publish(localTopic, 1, false, payload), "local request"); err != nil {
+		return ReplyPayload{}, fmt.Errorf("mqttpub: local publish failed: %w", err)
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -242,8 +267,8 @@ func (p *Publisher) Publish(data map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("mqttpub: marshal request: %w", err)
 	}
-	if token := p.pubClient.Publish(p.requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
-		return fmt.Errorf("mqttpub: publish failed: %w", token.Error())
+	if err := waitToken(p.pubClient.Publish(p.requestTopic, 1, false, payload), "publish"); err != nil {
+		return fmt.Errorf("mqttpub: publish failed: %w", err)
 	}
 	return nil
 }
@@ -255,5 +280,13 @@ func (p *Publisher) Publish(data map[string]any) error {
 func (p *Publisher) Close() {
 	if p.pubClient != nil && p.pubClient.IsConnected() {
 		p.pubClient.Disconnect(250)
+	}
+}
+
+// Resubscribe restores the reply subscription on the shared local client
+// after it reconnected (register with mqtts.OnReconnect).
+func (p *Publisher) Resubscribe(c mqtt.Client) {
+	if t := c.Subscribe(p.replySub, 1, p.handleReply); t.WaitTimeout(10*time.Second) && t.Error() != nil {
+		log.Printf("[mqttpub] ⚠ resubscribe to %s failed: %v", p.replySub, t.Error())
 	}
 }

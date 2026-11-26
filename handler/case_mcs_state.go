@@ -156,7 +156,7 @@ func handleMCSStateCase(
 
 	// Readings envelope: every key here is in statusKeys (handler_shape.go),
 	// so they land in the status jsonb the trigger reads.
-	processPatch(sess, keys, cfg, nil, rMsgJSONChan, nil)
+	processPatchKeepQueue(sess, keys, cfg, rMsgJSONChan)
 }
 
 // ── Inputs ────────────────────────────────────────────────────────────────

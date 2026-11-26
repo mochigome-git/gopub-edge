@@ -64,6 +64,8 @@ func getClientOptions(broker, port string) *mqtt.ClientOptions {
 	opts.SetPassword("public")
 	opts.OnConnect = connectHandler
 	opts.OnConnectionLost = connectLostHandler
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
 	return opts
 }
 
@@ -93,6 +95,8 @@ func ECSgetClientOptionsTLS(broker, port, ECScaCert, ECSclientCert, ECSclientKey
 	opts.SetTLSConfig(tlsConfig)
 	opts.OnConnect = connectHandler
 	opts.OnConnectionLost = connectLostHandler
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(10 * time.Second)
 
 	return opts, nil
 }
@@ -172,12 +176,16 @@ func Run(client mqtt.Client, cfg config.MqttConfig, receivedMessagesJSONChan cha
 	stopFlusher := make(chan struct{})
 	go startBatchFlusher(receivedMessagesJSONChan, stopFlusher)
 
-	if token := client.Subscribe(cfg.Topic, 0, func(client mqtt.Client, msg mqtt.Message) {
-		messageReceived(msg)
-	}); token.Wait() && token.Error() != nil {
+	onMsg := func(client mqtt.Client, msg mqtt.Message) { messageReceived(msg) }
+	if token := client.Subscribe(cfg.Topic, 0, onMsg); token.Wait() && token.Error() != nil {
 		log.Fatalf("[mqttlocal] Error subscribing to topic: %v", token.Error())
 		return
 	}
+	OnReconnect(func(c mqtt.Client) {
+		if t := c.Subscribe(cfg.Topic, 0, onMsg); t.WaitTimeout(10*time.Second) && t.Error() != nil {
+			log.Printf("[mqttlocal] ⚠ resubscribe to %s failed: %v", cfg.Topic, t.Error())
+		}
+	})
 
 	log.Printf("[mqttlocal] Subscribed to topic: %s\n", cfg.Topic)
 
@@ -371,12 +379,41 @@ func flushMessages(receivedMessagesJSONChan chan<- string, force bool) {
 // Utility
 // --------------------------------------------------------------------------
 
-var connectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
-	log.Println("[mqttlocal] ✓ Connected to MQTT broker")
+// Subscriptions to restore after a reconnect. The local client uses a
+// clean session, so the broker forgets them when the connection drops.
+var (
+	resubMu       sync.Mutex
+	resubs        []func(mqtt.Client)
+	everConnected atomic.Bool
+)
+
+// OnReconnect registers f to run after every RE-connect of the local
+// client (not the first connect) — use it to subscribe again.
+func OnReconnect(f func(mqtt.Client)) {
+	resubMu.Lock()
+	resubs = append(resubs, f)
+	resubMu.Unlock()
 }
 
+var connectHandler mqtt.OnConnectHandler = func(client mqtt.Client) {
+	if !everConnected.Swap(true) {
+		log.Println("[mqttlocal] ✓ Connected to MQTT broker")
+		return
+	}
+	log.Println("[mqttlocal] ✓ Reconnected to MQTT broker — restoring subscriptions")
+	resubMu.Lock()
+	fs := append([]func(mqtt.Client){}, resubs...)
+	resubMu.Unlock()
+	for _, f := range fs {
+		f(client)
+	}
+}
+
+// Was log.Fatalf: a Mosquitto restart killed gopub-edge and with it every
+// in-memory job, lot latch and machine state. paho reconnects by itself;
+// connectHandler restores the subscriptions.
 var connectLostHandler mqtt.ConnectionLostHandler = func(client mqtt.Client, err error) {
-	log.Fatalf("[mqttlocal] ✗ Connection lost: %v\n", err)
+	log.Printf("[mqttlocal] ✗ Connection lost: %v — reconnecting", err)
 }
 
 func ResetReceivedMessages() {

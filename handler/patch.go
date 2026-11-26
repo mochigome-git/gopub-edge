@@ -27,11 +27,31 @@ func processPatch(session *session.Session, keys []string, cfg config.AppConfig,
 // session.ProcessedPayloadsMap. The job case passes a frozen snapshot so
 // nothing a later frame does to the session can change what gets posted.
 func processPatchFrom(session *session.Session, src map[string]map[string]any, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, kind ...envelopeKind) {
+	// Job and lot posts must NOT drain the input queue: rMsgJSONChan is the
+	// main PLC-data channel, and draining it throws away every queued
+	// batch — e.g. the next lot press, the first frames of the next job,
+	// a state change. The drain only made sense for the old hold/weight
+	// cases, which wanted to skip frames that piled up during a slow
+	// synchronous HTTP call.
+	drain := true
+	if len(kind) > 0 && (kind[0] == envelopeJob || kind[0] == envelopeLot) {
+		drain = false
+	}
+	processPatchOpts(session, src, keys, cfg, after, rMsgJSONChan, plcApp, drain, kind...)
+}
+
+// processPatchKeepQueue is processPatch without draining the input queue —
+// for event cases (machine state) that must see every following frame.
+func processPatchKeepQueue(session *session.Session, keys []string, cfg config.AppConfig, rMsgJSONChan <-chan string) {
+	processPatchOpts(session, session.ProcessedPayloadsMap, keys, cfg, nil, rMsgJSONChan, nil, false)
+}
+
+func processPatchOpts(session *session.Session, src map[string]map[string]any, keys []string, cfg config.AppConfig, after func(), rMsgJSONChan <-chan string, plcApp *app.Application, drain bool, kind ...envelopeKind) {
 	session.Mutex.Lock()
 	session.IsProcessing = true
 	session.Mutex.Unlock()
 
-	log.Println("[patch] All weight triggers are now inactive. Processing the patch.")
+	log.Printf("[patch] publishing %v", keys)
 
 	parts := []map[string]any{}
 	for _, key := range keys {
@@ -58,13 +78,27 @@ func processPatchFrom(session *session.Session, src map[string]map[string]any, k
 			nullCount++
 		}
 	}
+	isEvent := len(kind) > 0 && (kind[0] == envelopeJob || kind[0] == envelopeLot)
+	if nullCount > 3 && isEvent {
+		// A finished job or a new lot is a one-off record — never drop it
+		// for having empty fields; drop the empty fields instead.
+		log.Printf("[patch] %s has %d null fields — dropping them and posting anyway", kind[0], nullCount)
+		for k, v := range data {
+			if v == nil {
+				delete(data, k)
+			}
+		}
+		nullCount = 0
+	}
 	if nullCount > 3 {
 		log.Println("[patch] Aborting patch: more than 3 null values in data")
 		resetWeightTriggers(session)
 		if after != nil {
 			after()
 		}
-		drainChannel(rMsgJSONChan)
+		if drain {
+			drainChannel(rMsgJSONChan)
+		}
 		return
 	}
 
@@ -126,7 +160,9 @@ func processPatchFrom(session *session.Session, src map[string]map[string]any, k
 	if after != nil {
 		after()
 	}
-	drainChannel(rMsgJSONChan)
+	if drain {
+		drainChannel(rMsgJSONChan)
+	}
 
 	if plcApp != nil {
 		err := plcApp.WritePLC(context.Background(), cfg.Plc.PlcDevice, cfg.Plc.PlcData)

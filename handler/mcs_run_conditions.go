@@ -129,7 +129,7 @@ func updateRunRuleValues(sess *session.Session, r mcsRunRules, jsonPayloads *uti
 			if v, num := readNumber(raw); num {
 				sess.RunRuleLast[reg] = v
 			} else {
-				warnLotOnce(fmt.Sprintf("handleMCSStateCase: register %q has non-numeric value %v (%T)", reg, raw, raw))
+				warnLotOnceKey("state-nonnum:"+reg, fmt.Sprintf("handleMCSStateCase: register %q has non-numeric value %v (%T)", reg, raw, raw))
 			}
 		}
 		if _, seen := sess.RunRuleLast[reg]; !seen {

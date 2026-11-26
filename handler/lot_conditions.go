@@ -107,8 +107,12 @@ func parseLotCondition(register, raw string) (lotCondition, error) {
 // Each bad env value is reported once, not on every poll.
 var lotWarned sync.Map
 
-func warnLotOnce(msg string) {
-	if _, seen := lotWarned.LoadOrStore(msg, true); !seen {
+func warnLotOnce(msg string) { warnLotOnceKey(msg, msg) }
+
+// warnLotOnceKey logs msg once per key. Use a fixed key when msg contains
+// a changing value, or every new value would be logged and kept forever.
+func warnLotOnceKey(key, msg string) {
+	if _, seen := lotWarned.LoadOrStore(key, true); !seen {
 		log.Print(msg)
 	}
 }
@@ -197,7 +201,7 @@ func updateLotConditions(sess *session.Session, conds []lotCondition, jsonPayloa
 		}
 		v, ok := readNumber(raw)
 		if !ok {
-			warnLotOnce(fmt.Sprintf("handleLotCase: register %q has non-numeric value %v (%T)", c.Register, raw, raw))
+			warnLotOnceKey("nonnum:"+c.Register, fmt.Sprintf("handleLotCase: register %q has non-numeric value %v (%T)", c.Register, raw, raw))
 			continue
 		}
 		sess.LotCondLast[c.Register] = v
