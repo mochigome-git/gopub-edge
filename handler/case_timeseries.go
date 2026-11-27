@@ -42,6 +42,19 @@ import (
 //                                         cycle since the last publish are sent
 //                                         as 1 — a < 1 s button press would
 //                                         otherwise fall between snapshots
+//   TIMESERIES_MAX_AGE_SEC=9              (optional, default 3 × interval) how
+//                                         long a register's last value may be
+//                                         carried into later snapshots
+//   TIMESERIES_CARRY_FORWARD=false        (optional) turn carry-forward off
+//
+// Carry-forward: registers arrive as separate MQTT messages and a batch
+// often closes mid-cycle, so one batch holds ~128 of 141 registers and the
+// rest land in the next. Instead of rejecting those batches, every batch
+// (complete or not) is merged into a last-value cache, and the snapshot is
+// the cache: each register's newest value, as long as it is younger than
+// TIMESERIES_MAX_AGE_SEC. TIMESERIES_MIN_REGISTERS then checks that merged
+// snapshot, so it only trips when registers really stop arriving (PLC /
+// MQTT down), not on a batch split.
 
 const timeseriesPrefix = "CASE_TS_"
 
@@ -52,7 +65,13 @@ type timeseriesSampler struct {
 	seq      uint64 // bumped on every accepted complete cycle
 	sentSeq  uint64 // seq of the last published cycle
 	lastSent time.Time
-	heldOn   map[string]bool // TIMESERIES_HOLD_ON registers seen ON since the last publish
+	heldOn   map[string]bool     // TIMESERIES_HOLD_ON registers seen ON since the last publish
+	cache    map[string]tsCached // carry-forward: output key -> newest value
+}
+
+type tsCached struct {
+	v  any
+	at time.Time
 }
 
 var (
@@ -78,23 +97,93 @@ func handleTimeseriesCase(jsonPayloads *utils.SafeJsonPayloads, cfg config.AppCo
 	// pulse is never lost between the 3 s snapshots.
 	tsSampler.noteHeldOn(jsonPayloads)
 
-	snapshot, ok := buildTimeseriesSnapshot(jsonPayloads)
-	if !ok {
-		// partial batch, keep the previous complete snapshot — but say so
-		// (rate-limited) so a too-high TIMESERIES_MIN_REGISTERS is visible.
-		if time.Since(tsLastRejectLog) > 30*time.Second {
-			tsLastRejectLog = time.Now()
-			log.Printf("[timeseries] ⚠ batch rejected — %d registers, TIMESERIES_MIN_REGISTERS=%d",
-				len(jsonPayloads.GetData()), timeseriesMinRegisters())
+	if !timeseriesCarryForward() {
+		snapshot, ok := buildTimeseriesSnapshot(jsonPayloads)
+		if !ok {
+			logTimeseriesReject(len(jsonPayloads.GetData()), 0)
+			return
 		}
+		tsSampler.mu.Lock()
+		tsSampler.latest = snapshot
+		tsSampler.latestAt = time.Now()
+		tsSampler.seq++
+		tsSampler.mu.Unlock()
 		return
 	}
 
-	tsSampler.mu.Lock()
-	tsSampler.latest = snapshot
-	tsSampler.latestAt = time.Now()
-	tsSampler.seq++
-	tsSampler.mu.Unlock()
+	batch := shapeTimeseriesRegisters(jsonPayloads.GetData())
+	if len(batch) == 0 {
+		return
+	}
+	merged, ok := tsSampler.mergeBatch(batch, time.Now(), timeseriesMaxAge(), timeseriesMinRegisters())
+	if !ok {
+		logTimeseriesReject(len(batch), merged)
+	}
+}
+
+// logTimeseriesReject says (rate-limited) that a snapshot was not stored, so
+// a too-high TIMESERIES_MIN_REGISTERS is visible. merged = registers in the
+// carry-forward snapshot (0 when carry-forward is off).
+func logTimeseriesReject(batch, merged int) {
+	if time.Since(tsLastRejectLog) <= 30*time.Second {
+		return
+	}
+	tsLastRejectLog = time.Now()
+	if merged > 0 {
+		log.Printf("[timeseries] ⚠ snapshot rejected — %d fresh registers (batch %d), TIMESERIES_MIN_REGISTERS=%d — registers stopped arriving?",
+			merged, batch, timeseriesMinRegisters())
+		return
+	}
+	log.Printf("[timeseries] ⚠ batch rejected — %d registers, TIMESERIES_MIN_REGISTERS=%d",
+		batch, timeseriesMinRegisters())
+}
+
+// mergeBatch folds one batch into the carry-forward cache and, if the
+// merged snapshot has at least min registers, stores it as the latest.
+// Returns the merged size and whether it was stored.
+//
+// TIMESERIES_HOLD_ON registers are never carried forward as ON: a pulse is
+// already sent exactly once by the hold logic, and repeating a stale 1 from
+// the cache would turn one button press into several. A hold register not
+// in this batch is sent as 0 (a real ON in any batch is still caught by
+// noteHeldOn).
+func (s *timeseriesSampler) mergeBatch(batch map[string]any, now time.Time, maxAge time.Duration, min int) (int, bool) {
+	hold := map[string]bool{}
+	for _, r := range timeseriesHoldOnKeys() {
+		hold[r] = true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache == nil {
+		s.cache = make(map[string]tsCached, len(batch))
+	}
+	for k, v := range batch {
+		s.cache[k] = tsCached{v: v, at: now}
+	}
+
+	snapshot := make(map[string]any, len(s.cache))
+	for k, c := range s.cache {
+		if now.Sub(c.at) > maxAge {
+			delete(s.cache, k) // stopped arriving
+			continue
+		}
+		if _, fresh := batch[k]; !fresh && hold[k] {
+			if v, num := readNumber(c.v); num && v != 0 {
+				snapshot[k] = float64(0)
+				continue
+			}
+		}
+		snapshot[k] = c.v
+	}
+
+	if min > 0 && len(snapshot) < min {
+		return len(snapshot), false
+	}
+	s.latest = snapshot
+	s.latestAt = now
+	s.seq++
+	return len(snapshot), true
 }
 
 // buildTimeseriesSnapshot takes EVERY register in the cycle as-is (raw
@@ -115,6 +204,16 @@ func buildTimeseriesSnapshot(jsonPayloads *utils.SafeJsonPayloads) (map[string]a
 		return nil, false
 	}
 
+	out := shapeTimeseriesRegisters(raw)
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// shapeTimeseriesRegisters lower-cases addresses, drops TIMESERIES_EXCLUDE
+// and applies CASE_TS_ renames.
+func shapeTimeseriesRegisters(raw map[string]any) map[string]any {
 	exclude := map[string]bool{}
 	for _, r := range strings.Split(os.Getenv("TIMESERIES_EXCLUDE"), ",") {
 		if r = strings.ToLower(strings.TrimSpace(r)); r != "" {
@@ -140,11 +239,7 @@ func buildTimeseriesSnapshot(jsonPayloads *utils.SafeJsonPayloads) (map[string]a
 			out[register] = v
 		}
 	}
-
-	if len(out) == 0 {
-		return nil, false
-	}
-	return out, true
+	return out
 }
 
 func timeseriesMinRegisters() int {
@@ -221,6 +316,35 @@ func (s *timeseriesSampler) run(cfg config.AppConfig, interval time.Duration) {
 // and safe to call if the timeseries case was never used.
 func StopTimeseries() {
 	tsStopOnce.Do(func() { close(tsStop) })
+}
+
+// timeseriesCarryForward: on unless TIMESERIES_CARRY_FORWARD=false.
+func timeseriesCarryForward() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("TIMESERIES_CARRY_FORWARD")), "false")
+}
+
+// timeseriesMaxAge: TIMESERIES_MAX_AGE_SEC, default 3 × the publish interval.
+func timeseriesMaxAge() time.Duration {
+	if sec, err := strconv.Atoi(os.Getenv("TIMESERIES_MAX_AGE_SEC")); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	return 3 * timeseriesInterval()
+}
+
+// timeseriesHoldOnKeys: the HOLD_ON registers under their output names
+// (CASE_TS_ rename applied), as they appear in a snapshot.
+func timeseriesHoldOnKeys() []string {
+	rename := map[string]string{}
+	for newKey, register := range utils.GetKeyTransformationsFromEnv(timeseriesPrefix) {
+		rename[strings.ToLower(register)] = strings.ToLower(newKey)
+	}
+	regs := timeseriesHoldOn()
+	for i, r := range regs {
+		if name, ok := rename[r]; ok {
+			regs[i] = name
+		}
+	}
+	return regs
 }
 
 func timeseriesInterval() time.Duration {
