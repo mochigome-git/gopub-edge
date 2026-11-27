@@ -149,7 +149,7 @@ func handleWeightMCSCase(session *session.Session, jsonPayloads *utils.SafeJsonP
 	}
 
 	// Process Vacuum Trigger
-	vacuumTrigger, _ := jsonPayloads.Get(os.Getenv("CASE_4_VACUUM_reach_20pa"))
+	vacuumTrigger, _ := freshGet(jsonPayloads, os.Getenv("CASE_4_VACUUM_reach_20pa"))
 	if vacuumTrigger != nil {
 		processAndPrintforVacuum("vacuum", jsonPayloads, messages, session)
 	}
@@ -244,7 +244,7 @@ func processAndPrint(session *session.Session, key string, jsonPayloads *utils.S
 func processChannelTrigger(triggerEnvVar, prefix string, jsonPayloads *utils.SafeJsonPayloads,
 	messages []model.Message, session *session.Session) {
 
-	TRIGGER, ok := jsonPayloads.Get(os.Getenv(triggerEnvVar))
+	TRIGGER, ok := freshGet(jsonPayloads, os.Getenv(triggerEnvVar))
 	if !ok {
 		// fmt.Printf("Trigger key %s not found", os.Getenv(triggerEnvVar))
 		return
@@ -284,6 +284,9 @@ func processWeightTriggers(session *session.Session, jsonPayloads *utils.SafeJso
 		defer wg.Done()
 
 		triggerValue, ok := jsonPayloads.GetDC(os.Getenv(triggerKey))
+		if ok && jsonPayloads.IsCarried(os.Getenv(triggerKey)) {
+			ok = false // level trigger: only a value received in this batch
+		}
 		//	fmt.Println(triggerKey, ":", triggerValue)
 		if !ok {
 			// fmt.Printf("Trigger key %s not found\n", os.Getenv(triggerKey))

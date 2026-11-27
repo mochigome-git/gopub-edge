@@ -39,7 +39,7 @@ func handleStandardCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayload
 			utils.CalculateAndStoreInklot(jsonPayloads)
 			utils.ChangeName(jsonPayloads)
 
-			if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger == 0 {
+			if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger == 0 && !jsonPayloads.IsCarried(tk.TriggerKey) {
 				fmt.Println("Case 1")
 				fmt.Println(jsonPayloads)
 
@@ -61,7 +61,7 @@ func handleStandardCase(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayload
 // Process to check the time taken from 0 to 1; or CASE 1
 func handleTimeDurationTrigger(tk utils.TriggerKey, jsonPayloads *utils.SafeJsonPayloads, messages []model.Message, loop float64,
 ) {
-	if val, ok := jsonPayloads.Get(tk.TriggerKey); ok {
+	if val, ok := freshGet(jsonPayloads, tk.TriggerKey); ok {
 		fmt.Printf("Device name: %s, Payload: %v\n", tk.TriggerKey, val)
 	} else {
 		fmt.Printf("Device name: %s, Payload: <no data>\n", tk.TriggerKey)
@@ -70,7 +70,7 @@ func handleTimeDurationTrigger(tk utils.TriggerKey, jsonPayloads *utils.SafeJson
 	if startTime, exists := deviceStartTimeMap[tk.TriggerKey]; !exists {
 		deviceStartTimeMap[tk.TriggerKey] = time.Now()
 	} else {
-		if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger == 0 {
+		if trigger, ok := jsonPayloads.GetFloat64(tk.TriggerKey); ok && trigger == 0 && !jsonPayloads.IsCarried(tk.TriggerKey) {
 			utils.CalculateAndStoreInklot(jsonPayloads)
 			utils.ChangeName(jsonPayloads)
 			processMessagesLoop(jsonPayloads, messages, startTime, loop)

@@ -60,7 +60,7 @@ func handleHoldCase(session *session.Session, jsonPayloads *utils.SafeJsonPayloa
 	processChannelTrigger("CASE_4_TRIGGER_CH2", "ch2_", jsonPayloads, messages, session)
 	processChannelTrigger("CASE_4_TRIGGER_CH3", "ch3_", jsonPayloads, messages, session)
 
-	VACUUM_TRIGGER, _ := jsonPayloads.Get(os.Getenv("CASE_4_VACUUM_reach_20pa"))
+	VACUUM_TRIGGER, _ := freshGet(jsonPayloads, os.Getenv("CASE_4_VACUUM_reach_20pa"))
 	if VACUUM_TRIGGER != nil {
 		processAndPrintforVacuum("vacuum", jsonPayloads, messages, session)
 	}
@@ -174,7 +174,7 @@ func handleWeight(session *session.Session, jsonPayloads *utils.SafeJsonPayloads
 	}
 
 	// Process Vacuum Trigger
-	vacuumTrigger, _ := jsonPayloads.Get(os.Getenv("CASE_4_VACUUM_reach_20pa"))
+	vacuumTrigger, _ := freshGet(jsonPayloads, os.Getenv("CASE_4_VACUUM_reach_20pa"))
 	if vacuumTrigger != nil {
 		processAndPrintforVacuum("vacuum", jsonPayloads, messages, session)
 	}

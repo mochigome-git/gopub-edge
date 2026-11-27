@@ -11,6 +11,9 @@ type JsonPayloads map[string]any
 type SafeJsonPayloads struct {
 	mu   sync.RWMutex
 	data JsonPayloads
+	// carried: keys filled in from an earlier batch (carry-forward, see
+	// handler/carry_forward.go) rather than received in this one.
+	carried map[string]bool
 }
 
 func NewSafeJsonPayloads() *SafeJsonPayloads {
@@ -44,6 +47,35 @@ func (s *SafeJsonPayloads) Clear() {
 	for k := range s.data {
 		delete(s.data, k)
 	}
+	s.carried = nil
+}
+
+// SetCarried stores a value carried over from an earlier batch: readable
+// like any other key, but IsCarried reports it so edge/pulse logic can
+// tell it was not received in this batch.
+func (s *SafeJsonPayloads) SetCarried(key string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = value
+	if s.carried == nil {
+		s.carried = make(map[string]bool)
+	}
+	s.carried[key] = true
+}
+
+// IsCarried reports whether key was filled in by carry-forward rather than
+// received in this batch.
+func (s *SafeJsonPayloads) IsCarried(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.carried[key]
+}
+
+// CarriedCount is how many keys were filled in by carry-forward.
+func (s *SafeJsonPayloads) CarriedCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.carried)
 }
 
 func (s *SafeJsonPayloads) GetBool(key string) (bool, bool) {

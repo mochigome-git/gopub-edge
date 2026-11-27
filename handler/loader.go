@@ -53,6 +53,10 @@ func ProcessMQTTData(
 				jsonPayloads.Set(fieldNameLower, fieldValue)
 			}
 
+			// Complete the batch with registers that fell into an earlier
+			// one (see carry_forward.go).
+			carryForward(jsonPayloads)
+
 			// Start to collect data when trigger specify device
 			// collect the data for few seconds, process for further handling method.
 			// Change Payloads title or delete the extra devices and etc..

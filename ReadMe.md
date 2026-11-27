@@ -172,21 +172,27 @@ next row stores it as 1.
 TIMESERIES_HOLD_ON=x17          # winding meter reset button
 ```
 
-### Timeseries — full register set every row (carry-forward)
+### Carry-forward — every case sees the full register set
 
-Registers arrive as separate MQTT messages, so a batch often closes
-mid-cycle: one holds ~128 of 141 registers and the rest land in the next.
-Every batch is merged into a last-value cache and each row is the cache —
-every register's newest value, if younger than `TIMESERIES_MAX_AGE_SEC`
-(default 3 × interval). `TIMESERIES_MIN_REGISTERS` now checks that merged
-row, so set it to the full count (or a little under): it only rejects when
-registers really stop arriving. `TIMESERIES_HOLD_ON` bits are never carried
-forward as ON, so one press is still stored once.
+msp-edge publishes each register as its own MQTT message, and a batch
+often closes mid-scan: one holds ~128 of 141 registers, the rest land in the
+next. Every batch is now completed with each register's last value (if
+younger than `CARRY_MAX_AGE_SEC`, default 10 s) before any case runs, so:
+
+- timeseries rows carry the full set — set `TIMESERIES_MIN_REGISTERS` close
+  to it; it only rejects when registers really stop arriving
+- lot conditions (`LOT_CONDITION_MODE=now`) no longer read "not received"
+- job start/end date parts and setup fields are no longer missing
+
+`TIMESERIES_HOLD_ON` bits are never carried forward as ON (one press is
+still stored once), and the level triggers of the legacy filling / vacuum /
+timing cases only act on values received in the batch.
 
 ```env
-TIMESERIES_MIN_REGISTERS=135      # of 141; trips when the PLC / MQTT feed drops
-TIMESERIES_MAX_AGE_SEC=9          # optional, default 3 × TIMESERIES_INTERVAL_SEC
-TIMESERIES_CARRY_FORWARD=false    # optional, back to per-batch rows
+TIMESERIES_MIN_REGISTERS=135   # of 141
+CARRY_MAX_AGE_SEC=10           # optional
+CARRY_FORWARD=false            # optional, cases see the raw batch again
+CARRY_DEBUG=true               # optional, log how many were filled
 ```
 
 ### Cycle mode — one full PLC scan per row

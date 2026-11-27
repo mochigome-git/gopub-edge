@@ -24,12 +24,12 @@ func handleVacuumCase(session *session.Session, jsonPayloads *utils.SafeJsonPayl
 			}
 
 			for _, channel := range []string{"1min", "2min", "3min"} {
-				if val, found := jsonPayloads.Get(os.Getenv("CASE_10_VACUUM_LEAVE_" + channel)); found {
+				if val, found := freshGet(jsonPayloads, os.Getenv("CASE_10_VACUUM_LEAVE_"+channel)); found {
 					session.ProcessedPayloadsMap[MAP_NAME]["vacuum_leave_"+channel] = val
 				}
 			}
 
-			if val2, found := jsonPayloads.Get(os.Getenv("CASE_10_VACUUM_START")); found {
+			if val2, found := freshGet(jsonPayloads, os.Getenv("CASE_10_VACUUM_START")); found {
 				session.ProcessedPayloadsMap[MAP_NAME]["vacuum_start"] = val2
 			}
 
